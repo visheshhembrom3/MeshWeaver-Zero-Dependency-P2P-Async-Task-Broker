@@ -25,3 +25,19 @@ class UnknownMessageTypeError(ProtocolError):
 
 class InvalidPayloadError(ValidationError):
     """Raised when a message payload is structurally invalid or fails schema rules."""
+
+
+class PeerConnectionError(MeshWeaverError):
+    """Base exception for peer network and connection failures."""
+
+
+class ConnectionClosedError(PeerConnectionError):
+    """Raised when an operation is attempted on a closed connection."""
+
+
+class NetworkTimeoutError(PeerConnectionError):
+    """Raised when a network operation exceeds its timeout."""
+
+
+class HandshakeError(PeerConnectionError):
+    """Raised when a peer-to-peer handshake fails."""
