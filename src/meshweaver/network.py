@@ -18,6 +18,7 @@ from meshweaver.exceptions import (
     NetworkTimeoutError,
     PeerConnectionError,
 )
+from meshweaver.peers import PeerRegistry
 from meshweaver.protocol import (
     Message,
     MessageType,
@@ -140,10 +141,15 @@ class PeerNode:
         peer_id: str | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
+        *,
+        peer_registry: PeerRegistry | None = None,
     ) -> None:
         self.peer_id: str = peer_id if peer_id and peer_id.strip() else uuid.uuid4().hex[:12]
         self.host: str = host
         self.port: int = port
+        self.peer_registry: PeerRegistry = (
+            peer_registry if peer_registry is not None else PeerRegistry()
+        )
         self._bound_port: int | None = None
         self._server: asyncio.Server | None = None
         self._is_running: bool = False
@@ -204,6 +210,10 @@ class PeerNode:
             remote_node_id = str(msg.payload.get("node_id", msg.sender_id))
             conn.remote_peer_id = remote_node_id
             self._peer_connections[remote_node_id] = conn
+            port_val = msg.payload.get("port")
+            if port_val and isinstance(port_val, int) and not isinstance(port_val, bool):
+                remote_host = conn.peer_address[0]
+                self.peer_registry.register(remote_node_id, remote_host, port_val)
             return Message.create(
                 MessageType.HANDSHAKE_ACK,
                 sender_id=self.peer_id,
@@ -355,6 +365,7 @@ class PeerNode:
                 remote_node_id = str(resp.payload.get("node_id", resp.sender_id))
                 conn.remote_peer_id = remote_node_id
                 self._peer_connections[remote_node_id] = conn
+                self.peer_registry.register(remote_node_id, host, port)
             except Exception:
                 await conn.close()
                 self._connections.pop(id(conn), None)

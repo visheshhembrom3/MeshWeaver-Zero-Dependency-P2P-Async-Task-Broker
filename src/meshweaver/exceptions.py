@@ -62,3 +62,20 @@ class UnknownTaskError(TaskError):
 class TaskExecutionError(TaskError):
     """Raised when an error occurs during local execution of a registered task."""
 
+
+class PeerRegistryError(MeshWeaverError):
+    """Base exception for peer registry and membership tracking errors."""
+
+
+class InvalidPeerError(ValidationError, PeerRegistryError):
+    """Raised when a peer ID, endpoint, or record fails schema validation."""
+
+
+class DuplicatePeerError(PeerRegistryError):
+    """Raised when a duplicate peer registration conflicts with registry constraints."""
+
+
+class PeerNotFoundError(PeerRegistryError):
+    """Raised when an operation targets a peer ID that is not present in the registry."""
+
+

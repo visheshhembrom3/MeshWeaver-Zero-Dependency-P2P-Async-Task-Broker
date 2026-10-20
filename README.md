@@ -49,14 +49,18 @@ The diagram is conceptual. The actual network topology and implementation will e
 
 | Component | Responsibility |
 |---|---|
-| Async networking | Non-blocking communication between peers using Python networking primitives |
-| Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach |
+| Async networking | Non-blocking communication between peers using Python `asyncio` TCP primitives |
+| Peer registry | Track known peers by node ID and validated network endpoint with state transitions and TTL expiration |
+| Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach (planned) |
 | Workload gossip | Share approximate CPU and memory utilization with neighboring peers |
 | Task serialization | Define a structured, validated format for task requests and results |
 | Task routing | Select a suitable peer based on availability and reported load |
 | Fault monitoring | Use heartbeats and task timeouts to detect unresponsive peers |
 | CLI | Start nodes, submit tasks, and inspect status |
 | Web dashboard | Visualize peers, task states, and network activity |
+
+> **Note on Kademlia DHT:** `PeerRegistry` currently implements dynamic local peer membership, validated network endpoints, and deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`). A complete Kademlia-style DHT routing table (k-buckets, XOR distance metric, and iterative lookup RPCs) will be introduced in subsequent milestones.
+
 
 ## Technology Stack
 
@@ -138,12 +142,13 @@ python examples/two_peers.py --verbose
 - [x] **Validated task schemas & registry:** Created `TaskRequest`, `TaskResponse`, `TaskErrorInfo`, and `TaskRegistry` with strict identifier safety, 64 KB size limits, and code injection prevention.
 - [x] **Two-peer communication demonstration:** Created `examples/two_peers.py` and integration tests demonstrating handshake, ping/pong exchange, local task execution, error handling, and orderly shutdown.
 
-### Week 2 — Discovery and Workload Sharing
-- Implement a Kademlia-style peer-discovery layer.
-- Add peer registry and routing-table tests.
-- Collect CPU/memory load metrics where supported.
-- Exchange workload updates between peers.
-- Run a multi-node local network experiment and document results.
+### Week 2 — Discovery and Workload Sharing (In Progress)
+- [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
+- [ ] Implement a Kademlia-style peer-discovery layer.
+- [ ] Add routing-table tests (k-buckets, XOR distance).
+- [ ] Collect CPU/memory load metrics where supported.
+- [ ] Exchange workload updates between peers.
+- [ ] Run a multi-node local network experiment and document results.
 
 ### Week 3 — Routing and Reliability
 - Add task submission and task lifecycle states.
