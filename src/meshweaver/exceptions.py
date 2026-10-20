@@ -41,3 +41,24 @@ class NetworkTimeoutError(PeerConnectionError):
 
 class HandshakeError(PeerConnectionError):
     """Raised when a peer-to-peer handshake fails."""
+
+
+class TaskError(MeshWeaverError):
+    """Base exception for task-related errors."""
+
+
+class InvalidTaskError(ValidationError, TaskError):
+    """Raised when a task request, response, or payload fails schema validation."""
+
+
+class TaskPayloadLimitError(InvalidTaskError):
+    """Raised when a task payload, field, or result exceeds size, count, or depth limits."""
+
+
+class UnknownTaskError(TaskError):
+    """Raised when a task handler is requested for an unregistered task name."""
+
+
+class TaskExecutionError(TaskError):
+    """Raised when an error occurs during local execution of a registered task."""
+

@@ -47,17 +47,22 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
     """
     if message_type == MessageType.TASK_REQUEST:
         task_id = payload.get("task_id")
-        task_type = payload.get("task_type")
+        task_name = payload.get("task_name") if "task_name" in payload else payload.get("task_type")
         if not isinstance(task_id, str) or not task_id.strip():
             raise InvalidPayloadError(
                 "TASK_REQUEST payload must include a non-empty string 'task_id'"
             )
-        if not isinstance(task_type, str) or not task_type.strip():
+        if not isinstance(task_name, str) or not task_name.strip():
             raise InvalidPayloadError(
-                "TASK_REQUEST payload must include a non-empty string 'task_type'"
+                "TASK_REQUEST payload must include a non-empty string 'task_name' or 'task_type'"
             )
         if "params" in payload and not isinstance(payload["params"], dict):
             raise InvalidPayloadError("TASK_REQUEST 'params' must be a dictionary")
+        if "kwargs" in payload and not isinstance(payload["kwargs"], dict):
+            raise InvalidPayloadError("TASK_REQUEST 'kwargs' must be a dictionary")
+        if "args" in payload and not isinstance(payload["args"], (list, tuple)):
+            raise InvalidPayloadError("TASK_REQUEST 'args' must be a list or tuple")
+
 
     elif message_type == MessageType.TASK_RESPONSE:
         task_id = payload.get("task_id")
