@@ -102,22 +102,41 @@ python -m pip install -U pip
 pip install -e ".[dev]"
 ```
 
-Run tests once the test suite is available:
+Run the test suite:
 
 ```bash
 pytest
 ```
 
-Run the CLI using the entry point documented by the implementation. Commands may change while the project is in development; check `--help` after the CLI is implemented.
+### Running the Two-Peer Demonstration
+
+Demonstrate two local MeshWeaver nodes binding dynamic ports, completing an asynchronous handshake, exchanging a ping/pong message, and executing validated task requests (`add`, `reverse_string`) with orderly shutdown:
+
+```bash
+python examples/two_peers.py
+```
+
+Or run via the package CLI entry point:
+
+```bash
+python -m meshweaver --demo
+```
+
+Use `-v` or `--verbose` for detailed network framing and event logs:
+
+```bash
+python examples/two_peers.py --verbose
+```
 
 ## Roadmap
 
-### Week 1 — Networking Foundation
-- Create the package structure and project configuration.
-- Implement a basic asynchronous peer server/client.
-- Define structured messages and task serialization.
-- Add input validation, logging, and unit tests.
-- Demonstrate two local nodes communicating.
+### Week 1 — Networking Foundation (Completed)
+
+- [x] **Package structure and configuration:** Initialized zero-dependency `meshweaver` package with Python 3.11+ type hints and `pytest` configuration.
+- [x] **Async message protocol:** Implemented length-prefixed binary framing, 10 MB frame limits, and JSON-serialized `Message` envelopes.
+- [x] **Async peer networking:** Built `PeerNode` and `PeerConnection` with non-blocking stream handling, dynamic port binding, handshake negotiation, and correlated request-response matching.
+- [x] **Validated task schemas & registry:** Created `TaskRequest`, `TaskResponse`, `TaskErrorInfo`, and `TaskRegistry` with strict identifier safety, 64 KB size limits, and code injection prevention.
+- [x] **Two-peer communication demonstration:** Created `examples/two_peers.py` and integration tests demonstrating handshake, ping/pong exchange, local task execution, error handling, and orderly shutdown.
 
 ### Week 2 — Discovery and Workload Sharing
 - Implement a Kademlia-style peer-discovery layer.
