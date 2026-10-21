@@ -35,6 +35,8 @@ class MessageType(StrEnum):
     TASK_REQUEST = "TASK_REQUEST"
     TASK_RESPONSE = "TASK_RESPONSE"
     LOAD_REPORT = "LOAD_REPORT"
+    FIND_NODE = "FIND_NODE"
+    NODES_FOUND = "NODES_FOUND"
     ERROR = "ERROR"
 
 
@@ -126,6 +128,36 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
                 or not (0.0 <= mem <= 100.0)
             ):
                 raise InvalidPayloadError("LOAD_REPORT 'memory_percent' must be a float between 0.0 and 100.0")
+
+    elif message_type == MessageType.FIND_NODE:
+        target_id = payload.get("target_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            raise InvalidPayloadError(
+                "FIND_NODE payload must include a non-empty string 'target_id'"
+            )
+        if "count" in payload:
+            count = payload["count"]
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+                or count > 1000
+            ):
+                raise InvalidPayloadError("FIND_NODE 'count' must be an integer between 1 and 1000")
+
+    elif message_type == MessageType.NODES_FOUND:
+        target_id = payload.get("target_id")
+        if "target_id" in payload and (not isinstance(target_id, str) or not target_id.strip()):
+            raise InvalidPayloadError("NODES_FOUND 'target_id' must be a non-empty string if provided")
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, (list, tuple)):
+            raise InvalidPayloadError("NODES_FOUND payload must include a 'nodes' list")
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise InvalidPayloadError("Each item in NODES_FOUND 'nodes' must be a dictionary")
+            peer_id = node.get("peer_id") or node.get("node_id")
+            if not isinstance(peer_id, str) or not peer_id.strip():
+                raise InvalidPayloadError("Each node in 'nodes' must have a non-empty 'peer_id' or 'node_id'")
 
 
 @dataclass(frozen=True, slots=True)

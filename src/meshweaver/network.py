@@ -168,6 +168,11 @@ class PeerNode:
         # Register default protocol handlers
         self._register_default_handlers()
 
+        # DHT routing table
+        from meshweaver.dht import RoutingTable
+
+        self.routing_table: RoutingTable = RoutingTable(self.node_id)
+
     @property
     def is_running(self) -> bool:
         """Return True if the peer server is actively running."""
@@ -179,6 +184,13 @@ class PeerNode:
         if self._bound_port is not None:
             return self._bound_port
         return self.port
+
+    @property
+    def node_id(self) -> Any:
+        """Return deterministic NodeID for DHT operations."""
+        from meshweaver.dht import NodeID
+
+        return NodeID.from_peer(self.peer_id)
 
     @property
     def active_connections(self) -> list[PeerConnection]:
@@ -213,7 +225,11 @@ class PeerNode:
             port_val = msg.payload.get("port")
             if port_val and isinstance(port_val, int) and not isinstance(port_val, bool):
                 remote_host = conn.peer_address[0]
-                self.peer_registry.register(remote_node_id, remote_host, port_val)
+                rec = self.peer_registry.register(remote_node_id, remote_host, port_val)
+                try:
+                    self.routing_table.add_contact(rec.to_contact())
+                except Exception:
+                    pass
             return Message.create(
                 MessageType.HANDSHAKE_ACK,
                 sender_id=self.peer_id,
@@ -222,8 +238,35 @@ class PeerNode:
                 payload={"node_id": self.peer_id, "status": "accepted"},
             )
 
+        async def _handle_find_node(msg: Message, _conn: PeerConnection) -> Message:
+            from meshweaver.dht import NodeID
+
+            target_val = msg.payload.get("target_id", "")
+            count = int(msg.payload.get("count", 20))
+            try:
+                target_node = NodeID.from_peer(target_val)
+            except Exception:
+                target_node = NodeID.from_string(str(target_val))
+
+            closest = self.peer_registry.find_closest_peers(
+                target_node,
+                count=count,
+                exclude=[msg.sender_id, self.peer_id],
+            )
+            return Message.create(
+                MessageType.NODES_FOUND,
+                sender_id=self.peer_id,
+                recipient_id=msg.sender_id,
+                correlation_id=msg.message_id,
+                payload={
+                    "target_id": str(target_val),
+                    "nodes": [p.to_dict() for p in closest],
+                },
+            )
+
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
+        self.register_handler(MessageType.FIND_NODE, _handle_find_node)
 
     async def start(self) -> None:
         """
@@ -365,7 +408,11 @@ class PeerNode:
                 remote_node_id = str(resp.payload.get("node_id", resp.sender_id))
                 conn.remote_peer_id = remote_node_id
                 self._peer_connections[remote_node_id] = conn
-                self.peer_registry.register(remote_node_id, host, port)
+                rec = self.peer_registry.register(remote_node_id, host, port)
+                try:
+                    self.routing_table.add_contact(rec.to_contact())
+                except Exception:
+                    pass
             except Exception:
                 await conn.close()
                 self._connections.pop(id(conn), None)
@@ -466,3 +513,102 @@ class PeerNode:
     async def send_message(self, connection: PeerConnection, message: Message) -> None:
         """Send a one-way message over an existing connection without awaiting reply."""
         await connection.send(message)
+
+    async def find_node_remote(
+        self,
+        connection: PeerConnection,
+        target: Any,
+        count: int = 20,
+        timeout: float = 3.0,
+    ) -> list[Any]:
+        """
+        Send a FIND_NODE RPC over an established connection and return discovered peer records.
+        """
+        from meshweaver.dht import NodeID
+        from meshweaver.peers import PeerRecord
+
+        target_node = NodeID.from_peer(target)
+        req = Message.create(
+            MessageType.FIND_NODE,
+            sender_id=self.peer_id,
+            recipient_id=connection.remote_peer_id,
+            payload={"target_id": target_node.hex, "count": count},
+        )
+        resp = await self.send_request(connection, req, timeout=timeout)
+        if resp.message_type != MessageType.NODES_FOUND:
+            return []
+
+        raw_nodes = resp.payload.get("nodes", [])
+        discovered: list[PeerRecord] = []
+        for n in raw_nodes:
+            try:
+                rec = PeerRecord.from_dict(n)
+                discovered.append(rec)
+            except Exception:
+                pass
+        return discovered
+
+    async def iterative_find_node(
+        self,
+        target: Any,
+        *,
+        alpha: int = 3,
+        k: int = 20,
+        query_timeout: float = 2.0,
+        overall_timeout: float = 5.0,
+        max_queries: int = 50,
+        max_rounds: int = 20,
+    ) -> Any:
+        """
+        Perform an asynchronous iterative DHT lookup across network peers for target ID.
+        Discovered peers are automatically tracked in the local peer_registry.
+        """
+        from meshweaver.dht import IterativeLookup, NodeID, PeerContact
+
+        target_node = NodeID.from_peer(target)
+        initial = [
+            PeerContact.from_peer_record(p)
+            for p in self.peer_registry.list_active_peers()
+        ]
+
+        async def _query_contact(contact: PeerContact, tgt: NodeID) -> list[Any]:
+            conn = self._peer_connections.get(contact.peer_id)
+            should_close = False
+            if conn is None or conn.is_closed:
+                try:
+                    conn = await self.connect_to_peer(
+                        contact.host,
+                        contact.port,
+                        timeout=query_timeout,
+                        do_handshake=True,
+                    )
+                    should_close = False
+                except Exception:
+                    return []
+
+            try:
+                records = await self.find_node_remote(conn, tgt, count=k, timeout=query_timeout)
+                for rec in records:
+                    try:
+                        self.peer_registry.register(rec.peer_id, rec.host, rec.port, metadata=rec.metadata)
+                        self.routing_table.add_contact(rec.to_contact())
+                    except Exception:
+                        pass
+                return records
+            finally:
+                if should_close and conn is not None:
+                    await conn.close()
+
+        lookup = IterativeLookup(
+            target=target_node,
+            initial_peers=initial,
+            query_fn=_query_contact,
+            alpha=alpha,
+            k=k,
+            query_timeout=query_timeout,
+            overall_timeout=overall_timeout,
+            max_queries=max_queries,
+            max_rounds=max_rounds,
+            local_node_id=self.node_id,
+        )
+        return await lookup.execute()

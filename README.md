@@ -51,7 +51,7 @@ The diagram is conceptual. The actual network topology and implementation will e
 |---|---|
 | Async networking | Non-blocking communication between peers using Python `asyncio` TCP primitives |
 | Peer registry | Track known peers by node ID and validated network endpoint with state transitions and TTL expiration |
-| Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach (planned) |
+| Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach with 160-bit identifiers and XOR distance metric |
 | Workload gossip | Share approximate CPU and memory utilization with neighboring peers |
 | Task serialization | Define a structured, validated format for task requests and results |
 | Task routing | Select a suitable peer based on availability and reported load |
@@ -59,7 +59,24 @@ The diagram is conceptual. The actual network topology and implementation will e
 | CLI | Start nodes, submit tasks, and inspect status |
 | Web dashboard | Visualize peers, task states, and network activity |
 
-> **Note on Kademlia DHT:** `PeerRegistry` currently implements dynamic local peer membership, validated network endpoints, and deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`). A complete Kademlia-style DHT routing table (k-buckets, XOR distance metric, and iterative lookup RPCs) will be introduced in subsequent milestones.
+### Kademlia Protocol Alignment and Mechanisms
+
+MeshWeaver implements a modular DHT-inspired peer discovery layer that serves as the foundation for evolving toward the full Kademlia protocol. The table below documents exactly which Kademlia mechanisms are currently implemented and which are planned for future milestones:
+
+| Kademlia Mechanism | Status | Details |
+|---|---|---|
+| **160-bit Keyspace** | **Implemented** | Fixed-length 160-bit `NodeID` (20 bytes) compatible with SHA-1 hashing of node identifiers and endpoints. |
+| **XOR Distance Metric** | **Implemented** | Deterministic bitwise metric $d(x, y) = x \oplus y$ satisfying mathematical guarantees (identity, symmetry, strict positivity, triangle inequality, unidirectionality). |
+| **Closest Peers Selection** | **Implemented** | Deterministic local selection of the $k$ closest known peers ordered strictly by XOR distance (`find_closest_peers` and `PeerRegistry.find_closest_peers`). |
+| **Iterative Peer Lookup** | **Implemented** | Multi-round asynchronous iterative search converging toward a target key with concurrency control ($\alpha$) via `IterativeLookup` and `iterative_peer_lookup`. |
+| **Duplicate Suppression** | **Implemented** | Tracking of candidate, queried, and unresponsive node IDs to ensure no peer is queried twice and cyclic graphs terminate cleanly. |
+| **Bounded Queries** | **Implemented** | Hard bounds on total queries (`max_queries`), iterative rounds (`max_rounds`), and concurrency ($\alpha$) to prevent runaway query storms. |
+| **Resilient Timeouts** | **Implemented** | Per-query timeout (`query_timeout`) isolating slow or crashed peers, plus overall lookup timeout (`overall_timeout`). |
+| **Discovery Wire Protocol** | **Implemented** | `FIND_NODE` and `NODES_FOUND` message schemas and asynchronous handlers integrated into `PeerNode`. |
+| **$k$-Bucket Routing Table** | **Implemented** | 160-bucket `RoutingTable` indexed by common prefix length (`cpl`), bounded by capacity $k$, with LRU contact ordering, replacement caching, and XOR distance closest-peer selection (`KBucket`, `RoutingTable`). |
+| **Ping-Before-Evict Policy** | Educational / Planned | Educational implementation uses deterministic LRU ordering with replacement caching; active network ping-before-evict RPC hook documented for future background maintenance. |
+| **Distributed Key-Value RPCs**| Planned | `STORE` and `FIND_VALUE` RPCs for decentralized content and task storage. |
+| **Bucket Refresh Timers** | Planned | Automatic refresh lookups for stale buckets and periodic key republishing. |
 
 
 ## Technology Stack
@@ -144,8 +161,8 @@ python examples/two_peers.py --verbose
 
 ### Week 2 — Discovery and Workload Sharing (In Progress)
 - [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
-- [ ] Implement a Kademlia-style peer-discovery layer.
-- [ ] Add routing-table tests (k-buckets, XOR distance).
+- [x] **DHT-inspired peer discovery & routing table:** Implemented 160-bit `NodeID` keyspace, deterministic XOR distance metric, `KBucket` routing buckets with LRU ordering and replacement caching, 160-bucket `RoutingTable` partitioned by Common Prefix Length (CPL), closest-peer selection, duplicate suppression, bounded queries, and resilient iterative lookup with timeouts.
+- [x] **Routing-table and DHT tests:** Added comprehensive unit and integration tests for XOR distance metric properties, bucket management (capacity, LRU ordering, updates, promotions), peer lookup, and unavailable/unresponsive peers.
 - [ ] Collect CPU/memory load metrics where supported.
 - [ ] Exchange workload updates between peers.
 - [ ] Run a multi-node local network experiment and document results.

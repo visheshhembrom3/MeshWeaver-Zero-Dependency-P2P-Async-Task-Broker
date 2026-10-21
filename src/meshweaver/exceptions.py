@@ -79,3 +79,17 @@ class PeerNotFoundError(PeerRegistryError):
     """Raised when an operation targets a peer ID that is not present in the registry."""
 
 
+class DHTError(MeshWeaverError):
+    """Base exception for DHT and peer discovery errors."""
+
+
+class InvalidNodeIDError(ValidationError, DHTError):
+    """Raised when a NodeID is malformed, invalid, or out of range."""
+
+
+class LookupTimeoutError(NetworkTimeoutError, DHTError):
+    """Raised when an iterative DHT lookup exceeds its configured timeout."""
+
+
+class LookupError(DHTError):
+    """Raised when an error occurs during peer lookup or routing."""

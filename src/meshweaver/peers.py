@@ -4,7 +4,7 @@ Dynamic peer registry, membership tracking, network endpoints, and stale record 
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 import ipaddress
@@ -218,6 +218,19 @@ class PeerRecord:
     def node_id(self) -> str:
         """Alias for peer_id."""
         return self.peer_id
+
+    @property
+    def dht_id(self) -> Any:
+        """Return deterministic NodeID for DHT operations."""
+        from meshweaver.dht import NodeID
+
+        return NodeID.from_peer(self)
+
+    def to_contact(self, node_id: Any = None) -> Any:
+        """Convert this PeerRecord to a DHT PeerContact."""
+        from meshweaver.dht import PeerContact
+
+        return PeerContact.from_peer_record(self, node_id=node_id)
 
     @property
     def host(self) -> str:
@@ -597,6 +610,44 @@ class PeerRegistry:
     def list_stale_peers(self, current_time: float | None = None) -> list[PeerRecord]:
         """Return list of all peers currently in STALE state."""
         return self.list_peers(state=PeerState.STALE, current_time=current_time)
+
+    def find_closest_peers(
+        self,
+        target: Any,
+        count: int = 20,
+        *,
+        active_only: bool = False,
+        exclude: Iterable[str] | None = None,
+        current_time: float | None = None,
+    ) -> list[PeerRecord]:
+        """
+        Locate the closest known peers to a target identifier ordered strictly by XOR distance.
+
+        Deduplicates candidates and tie-breaks deterministically by NodeID and peer ID.
+        """
+        from meshweaver.dht import NodeID
+
+        now = current_time if current_time is not None else time.time()
+        candidates = self.list_peers(active_only=active_only, include_expired=False, current_time=now)
+        target_node = NodeID.from_peer(target)
+
+        exclude_set: set[str] = set()
+        if exclude is not None:
+            for ex in exclude:
+                if isinstance(ex, str):
+                    exclude_set.add(ex)
+                elif hasattr(ex, "hex"):
+                    exclude_set.add(ex.hex)
+
+        filtered = [p for p in candidates if p.peer_id not in exclude_set]
+        filtered.sort(
+            key=lambda p: (
+                NodeID.from_peer(p).distance(target_node),
+                NodeID.from_peer(p).value,
+                p.peer_id,
+            )
+        )
+        return filtered[: max(0, count)]
 
     def list_expired_peers(
         self,
