@@ -24,3 +24,10 @@ def test_main_entrypoint_executes() -> None:
     assert result.returncode == 0
     assert "MeshWeaver" in result.stdout
     assert "0.1.0" in result.stdout
+
+
+def test_all_exports_present() -> None:
+    """Verify that every symbol listed in __all__ exists in meshweaver."""
+    for name in meshweaver.__all__:
+        assert hasattr(meshweaver, name), f"Missing export: {name}"
+

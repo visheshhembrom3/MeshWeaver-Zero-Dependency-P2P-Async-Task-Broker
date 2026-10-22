@@ -93,3 +93,16 @@ class LookupTimeoutError(NetworkTimeoutError, DHTError):
 
 class LookupError(DHTError):
     """Raised when an error occurs during peer lookup or routing."""
+
+
+class GossipError(MeshWeaverError):
+    """Base exception for gossip protocol and resource reporting errors."""
+
+
+class StaleDataError(GossipError):
+    """Raised when an incoming gossip record is rejected because it is stale."""
+
+
+class InvalidReportError(ValidationError, GossipError):
+    """Raised when a resource or gossip report fails validation."""
+

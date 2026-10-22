@@ -71,6 +71,7 @@ def test_serialization_deserialization_roundtrip() -> None:
         (MessageType.HEARTBEAT, {"status": "ok"}),
         (MessageType.TASK_RESPONSE, {"task_id": "t-1", "status": "success", "result": 42}),
         (MessageType.LOAD_REPORT, {"cpu_percent": 24.5, "memory_percent": 65.0}),
+        (MessageType.GOSSIP, {"node_id": "peer-z", "cpu_percent": 10.0, "memory_percent": 25.0, "active_task_count": 1, "health_status": "healthy"}),
         (MessageType.ERROR, {"code": "ERR_BUSY", "message": "Peer overloaded"}),
     ],
 )

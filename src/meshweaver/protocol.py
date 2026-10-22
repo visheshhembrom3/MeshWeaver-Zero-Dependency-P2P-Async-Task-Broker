@@ -35,9 +35,54 @@ class MessageType(StrEnum):
     TASK_REQUEST = "TASK_REQUEST"
     TASK_RESPONSE = "TASK_RESPONSE"
     LOAD_REPORT = "LOAD_REPORT"
+    GOSSIP = "GOSSIP"
     FIND_NODE = "FIND_NODE"
     NODES_FOUND = "NODES_FOUND"
     ERROR = "ERROR"
+
+
+def _validate_report_fields(data: dict[str, Any], type_name: str) -> None:
+    """Validate resource and status report payload fields."""
+    if "cpu_percent" in data:
+        cpu = data["cpu_percent"]
+        if (
+            isinstance(cpu, bool)
+            or not isinstance(cpu, (int, float))
+            or not (0.0 <= cpu <= 100.0)
+        ):
+            raise InvalidPayloadError(f"{type_name} 'cpu_percent' must be a float between 0.0 and 100.0")
+    if "memory_percent" in data:
+        mem = data["memory_percent"]
+        if (
+            isinstance(mem, bool)
+            or not isinstance(mem, (int, float))
+            or not (0.0 <= mem <= 100.0)
+        ):
+            raise InvalidPayloadError(f"{type_name} 'memory_percent' must be a float between 0.0 and 100.0")
+    if "active_task_count" in data:
+        active = data["active_task_count"]
+        if isinstance(active, bool) or not isinstance(active, int) or active < 0:
+            raise InvalidPayloadError(f"{type_name} 'active_task_count' must be a non-negative integer")
+    if "active_tasks" in data:
+        active = data["active_tasks"]
+        if isinstance(active, bool) or not isinstance(active, int) or active < 0:
+            raise InvalidPayloadError(f"{type_name} 'active_tasks' must be a non-negative integer")
+    if "timestamp" in data:
+        ts = data["timestamp"]
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts < 0:
+            raise InvalidPayloadError(f"{type_name} 'timestamp' must be a non-negative number")
+    if "health_status" in data:
+        health = data["health_status"]
+        if not isinstance(health, str) or not health.strip():
+            raise InvalidPayloadError(f"{type_name} 'health_status' must be a non-empty string")
+    if "node_id" in data:
+        nid = data["node_id"]
+        if not isinstance(nid, str) or not nid.strip():
+            raise InvalidPayloadError(f"{type_name} 'node_id' must be a non-empty string")
+    if "hops" in data:
+        hops = data["hops"]
+        if isinstance(hops, bool) or not isinstance(hops, int) or hops < 0:
+            raise InvalidPayloadError(f"{type_name} 'hops' must be a non-negative integer")
 
 
 def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any]) -> None:
@@ -112,22 +157,26 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
             )
 
     elif message_type == MessageType.LOAD_REPORT:
-        if "cpu_percent" in payload:
-            cpu = payload["cpu_percent"]
-            if (
-                isinstance(cpu, bool)
-                or not isinstance(cpu, (int, float))
-                or not (0.0 <= cpu <= 100.0)
-            ):
-                raise InvalidPayloadError("LOAD_REPORT 'cpu_percent' must be a float between 0.0 and 100.0")
-        if "memory_percent" in payload:
-            mem = payload["memory_percent"]
-            if (
-                isinstance(mem, bool)
-                or not isinstance(mem, (int, float))
-                or not (0.0 <= mem <= 100.0)
-            ):
-                raise InvalidPayloadError("LOAD_REPORT 'memory_percent' must be a float between 0.0 and 100.0")
+        _validate_report_fields(payload, "LOAD_REPORT")
+
+    elif message_type == MessageType.GOSSIP:
+        if "reports" in payload:
+            reports = payload["reports"]
+            if not isinstance(reports, (list, dict)):
+                raise InvalidPayloadError("GOSSIP 'reports' must be a list or dictionary")
+            if isinstance(reports, list):
+                for item in reports:
+                    if not isinstance(item, dict):
+                        raise InvalidPayloadError("Each item in GOSSIP 'reports' must be a dictionary")
+                    _validate_report_fields(item, "GOSSIP")
+            elif isinstance(reports, dict):
+                for item in reports.values():
+                    if not isinstance(item, dict):
+                        raise InvalidPayloadError("Each value in GOSSIP 'reports' must be a dictionary")
+                    _validate_report_fields(item, "GOSSIP")
+        else:
+            _validate_report_fields(payload, "GOSSIP")
+
 
     elif message_type == MessageType.FIND_NODE:
         target_id = payload.get("target_id")

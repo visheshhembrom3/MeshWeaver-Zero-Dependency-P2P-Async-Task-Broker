@@ -173,6 +173,10 @@ class PeerNode:
 
         self.routing_table: RoutingTable = RoutingTable(self.node_id)
 
+        # Asynchronous gossip engine for workload and health monitoring
+        self.gossip_engine: Any | None = None
+
+
     @property
     def is_running(self) -> bool:
         """Return True if the peer server is actively running."""
@@ -264,9 +268,63 @@ class PeerNode:
                 },
             )
 
+        async def _handle_gossip(msg: Message, conn: PeerConnection) -> None:
+            if self.gossip_engine is not None:
+                await self.gossip_engine.handle_gossip_message(msg, conn)
+
+        async def _handle_load_report(msg: Message, conn: PeerConnection) -> None:
+            if self.gossip_engine is not None:
+                await self.gossip_engine.handle_gossip_message(msg, conn)
+            elif self.peer_registry.has_peer(msg.sender_id):
+                meta: dict[str, Any] = {}
+                if "cpu_percent" in msg.payload:
+                    meta["cpu_percent"] = msg.payload["cpu_percent"]
+                if "memory_percent" in msg.payload:
+                    meta["memory_percent"] = msg.payload["memory_percent"]
+                if meta:
+                    self.peer_registry.update(msg.sender_id, metadata=meta)
+
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
         self.register_handler(MessageType.FIND_NODE, _handle_find_node)
+        self.register_handler(MessageType.GOSSIP, _handle_gossip)
+        self.register_handler(MessageType.LOAD_REPORT, _handle_load_report)
+
+    def enable_gossip(
+        self,
+        *,
+        interval: float = 5.0,
+        fanout: int = 3,
+        stale_threshold: float = 30.0,
+        ttl: float = 60.0,
+        max_hops: int = 3,
+        collector: Any | None = None,
+        task_count_provider: Callable[[], int] | None = None,
+    ) -> Any:
+        """
+        Enable and configure the asynchronous gossip engine on this node.
+        """
+        from meshweaver.gossip import GossipEngine
+
+        if self.gossip_engine is not None:
+            return self.gossip_engine
+
+        self.gossip_engine = GossipEngine(
+            node_id=self.peer_id,
+            peer_node=self,
+            peer_registry=self.peer_registry,
+            gossip_interval=interval,
+            fanout=fanout,
+            stale_threshold=stale_threshold,
+            ttl=ttl,
+            max_hops=max_hops,
+            collector=collector,
+            task_count_provider=task_count_provider,
+        )
+        if self._is_running:
+            self.gossip_engine.start()
+        return self.gossip_engine
+
 
     async def start(self) -> None:
         """
@@ -287,6 +345,9 @@ class PeerNode:
         self._is_running = True
         logger.info("PeerNode %s listening on %s:%d", self.peer_id, self.host, self.bound_port)
 
+        if self.gossip_engine is not None and not self.gossip_engine.is_running:
+            self.gossip_engine.start()
+
     async def stop(self) -> None:
         """
         Gracefully stop the peer server, cancel background listeners, and close connections.
@@ -296,8 +357,13 @@ class PeerNode:
 
         self._is_running = False
 
+        # Stop gossip engine first
+        if self.gossip_engine is not None and self.gossip_engine.is_running:
+            await self.gossip_engine.stop()
+
         # Close server first to stop accepting new connections
         if self._server is not None:
+
             self._server.close()
             try:
                 await asyncio.shield(asyncio.wait_for(self._server.wait_closed(), timeout=1.0))

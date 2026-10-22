@@ -163,9 +163,22 @@ python examples/two_peers.py --verbose
 - [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
 - [x] **DHT-inspired peer discovery & routing table:** Implemented 160-bit `NodeID` keyspace, deterministic XOR distance metric, `KBucket` routing buckets with LRU ordering and replacement caching, 160-bucket `RoutingTable` partitioned by Common Prefix Length (CPL), closest-peer selection, duplicate suppression, bounded queries, and resilient iterative lookup with timeouts.
 - [x] **Routing-table and DHT tests:** Added comprehensive unit and integration tests for XOR distance metric properties, bucket management (capacity, LRU ordering, updates, promotions), peer lookup, and unavailable/unresponsive peers.
-- [ ] Collect CPU/memory load metrics where supported.
-- [ ] Exchange workload updates between peers.
+- [x] **Gossip-based resource reporting:** Implemented asynchronous `GossipEngine`, `ResourceCollector`, `GossipStore`, and `NodeResourceReport` periodically sharing CPU, RAM, active task count, node identity, timestamp, and health status with bounded fanout peers.
+- [x] **Workload gossip & anti-amplification:** Built strict monotonic report validation, clock skew rejection, stale record discarding, TTL expiration, and amplification bounds (`fanout`, `max_hops`, seen cache, and sender exclusion).
 - [ ] Run a multi-node local network experiment and document results.
+
+### Gossip-Based Workload & Resource Monitoring
+
+MeshWeaver implements an asynchronous gossip engine for periodic workload and health status dissemination across neighboring peers:
+
+| Mechanism | Description |
+|---|---|
+| **Resource Collection** | Samples CPU percent, memory percent, active task count, node identity, timestamp, and operational health status (`HEALTHY`, `DEGRADED`, `UNHEALTHY`). Uses standard Python facilities (`ctypes` on Windows, `/proc` on Linux, `os.getloadavg` on Unix) with an optional `psutil` dependency for richer hardware metrics. |
+| **Monotonic Freshness** | Out-of-order, equal, or stale timestamps are rejected deterministically per node ID (`GossipStore`). Future timestamps exceeding clock skew tolerance (60s) are discarded. |
+| **Stale Record Handling** | Configurable staleness threshold (30s) marks inactive peer records as stale, and time-to-live (`ttl=60s`) deterministically purges expired status reports. |
+| **Bounded Fanout** | Periodic gossip rounds select at most `fanout` peers (default: 3) rather than broadcasting, avoiding $O(N^2)$ message explosions. |
+| **Hop Limit & Anti-Amplification** | Reports carry a hop counter incremented on each relay; reports reaching `max_hops` (default: 3) are halted. Senders are excluded from relays, and a seen timestamp cache prevents cyclic re-transmission. |
+
 
 ### Week 3 — Routing and Reliability
 - Add task submission and task lifecycle states.
