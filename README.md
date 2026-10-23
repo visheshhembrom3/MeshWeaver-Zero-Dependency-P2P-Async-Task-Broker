@@ -149,6 +149,21 @@ Use `-v` or `--verbose` for detailed network framing and event logs:
 python examples/two_peers.py --verbose
 ```
 
+### Inspecting Node and Peer Status
+
+Inspect the local node and mesh peers directly from the CLI:
+
+```bash
+# Print formatted ASCII table dashboard:
+python -m meshweaver status
+
+# Emit clean JSON output:
+python -m meshweaver status --json
+
+# Query mesh status via bootstrap seed nodes:
+python -m meshweaver status --seeds 127.0.0.1:8001
+```
+
 ## Roadmap
 
 ### Week 1 — Networking Foundation (Completed)
@@ -165,6 +180,7 @@ python examples/two_peers.py --verbose
 - [x] **Routing-table and DHT tests:** Added comprehensive unit and integration tests for XOR distance metric properties, bucket management (capacity, LRU ordering, updates, promotions), peer lookup, and unavailable/unresponsive peers.
 - [x] **Gossip-based resource reporting:** Implemented asynchronous `GossipEngine`, `ResourceCollector`, `GossipStore`, and `NodeResourceReport` periodically sharing CPU, RAM, active task count, node identity, timestamp, and health status with bounded fanout peers.
 - [x] **Workload gossip & anti-amplification:** Built strict monotonic report validation, clock skew rejection, stale record discarding, TTL expiration, and amplification bounds (`fanout`, `max_hops`, seen cache, and sender exclusion).
+- [x] **Node status and registry API:** Integrated peer discovery, registry membership, and gossip records into a clean internal `NodeStatusAPI`, `NodeStatusSnapshot`, and `PeerStatus`. Exposes registered peers, last-seen timestamps, reported resource metrics, peer health, active socket connections, and DHT proximity. Added structured logging and CLI `status` command (`--json`, `--seeds`).
 - [ ] Run a multi-node local network experiment and document results.
 
 ### Gossip-Based Workload & Resource Monitoring
@@ -178,6 +194,18 @@ MeshWeaver implements an asynchronous gossip engine for periodic workload and he
 | **Stale Record Handling** | Configurable staleness threshold (30s) marks inactive peer records as stale, and time-to-live (`ttl=60s`) deterministically purges expired status reports. |
 | **Bounded Fanout** | Periodic gossip rounds select at most `fanout` peers (default: 3) rather than broadcasting, avoiding $O(N^2)$ message explosions. |
 | **Hop Limit & Anti-Amplification** | Reports carry a hop counter incremented on each relay; reports reaching `max_hops` (default: 3) are halted. Senders are excluded from relays, and a seen timestamp cache prevents cyclic re-transmission. |
+
+### Node Status and Registry Inspection API
+
+The node status subsystem unifies discovery, registry membership, connection state, and gossip metrics into an observable snapshot:
+
+| Feature | Description |
+|---|---|
+| **`NodeStatusAPI`** | Core internal inspection service accessible via `node.status_api`, providing `get_node_status()`, `get_peer_status(peer_id)`, `list_peers()`, and `log_status()`. |
+| **`PeerStatus`** | Unified snapshot for each peer exposing `endpoint`, `state` (`ACTIVE`, `STALE`, `EXPIRED`), `last_seen`, `last_seen_seconds_ago`, `cpu_percent`, `memory_percent`, `active_task_count`, `health_status`, `is_connected`, and `dht_distance`. |
+| **Mesh Lifecycle Primitives** | `await node.join_mesh(seeds)` connects and handshakes with bootstrap nodes and discovers mesh peers; `await node.leave_mesh()` broadcasts an orderly `LEAVE` announcement and cleans up sockets. |
+| **Structured Logging** | `setup_structured_logging` and `log_node_status` emit structured key-value messages with full snapshot payloads in `extra["node_status"]` for log aggregators. |
+| **CLI Status Command** | `python -m meshweaver status` displays an ASCII table dashboard; `python -m meshweaver status --json` emits clean, parseable JSON; `--seeds` enables querying remote mesh status. |
 
 
 ### Week 3 — Routing and Reliability

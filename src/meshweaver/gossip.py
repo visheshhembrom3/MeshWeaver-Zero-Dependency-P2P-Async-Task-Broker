@@ -873,6 +873,16 @@ class GossipStore:
             logger.debug("Purged %d expired gossip records: %s", len(purged), purged)
         return purged
 
+    def remove(self, node_id: str) -> bool:
+        """
+        Remove a node's report and seen cache entry from the store.
+
+        Returns:
+            bool: True if a report was removed, False if node_id was not present.
+        """
+        self._seen_timestamps.pop(node_id, None)
+        return self._reports.pop(node_id, None) is not None
+
     def has_seen(self, node_id: str, timestamp: float) -> bool:
         """Return True if a report for node_id at or after timestamp was already seen."""
         seen_ts = self._seen_timestamps.get(node_id)

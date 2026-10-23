@@ -206,6 +206,21 @@ class PeerNode:
         """Return a snapshot mapping of known remote peer IDs to connections."""
         return dict(self._peer_connections)
 
+    @property
+    def status_api(self) -> Any:
+        """Internal node status and peer registry inspection API."""
+        from meshweaver.status import NodeStatusAPI
+
+        return NodeStatusAPI(self)
+
+    def get_status(self, *, current_time: float | None = None) -> Any:
+        """Return a NodeStatusSnapshot for this node and tracked peers."""
+        return self.status_api.get_node_status(current_time=current_time)
+
+    def get_peer_status(self, peer_id: str, *, current_time: float | None = None) -> Any:
+        """Return PeerStatus for a specific peer, or None if not found."""
+        return self.status_api.get_peer_status(peer_id, current_time=current_time)
+
     def register_handler(self, msg_type: MessageType, handler: MessageHandler) -> None:
         """Register a handler callback for incoming messages of a given MessageType."""
         self._handlers[msg_type] = handler
@@ -284,11 +299,25 @@ class PeerNode:
                 if meta:
                     self.peer_registry.update(msg.sender_id, metadata=meta)
 
+        async def _handle_leave(msg: Message, _conn: PeerConnection) -> None:
+            remote_node_id = str(msg.payload.get("node_id", msg.sender_id))
+            logger.info("Received LEAVE notice from peer %s", remote_node_id)
+            if remote_node_id in self._peer_connections:
+                self._peer_connections.pop(remote_node_id, None)
+            self.peer_registry.remove(remote_node_id)
+            try:
+                self.routing_table.remove_contact(remote_node_id)
+            except Exception:
+                pass
+            if self.gossip_engine is not None:
+                self.gossip_engine.store.remove(remote_node_id)
+
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
         self.register_handler(MessageType.FIND_NODE, _handle_find_node)
         self.register_handler(MessageType.GOSSIP, _handle_gossip)
         self.register_handler(MessageType.LOAD_REPORT, _handle_load_report)
+        self.register_handler(MessageType.LEAVE, _handle_leave)
 
     def enable_gossip(
         self,
@@ -678,3 +707,111 @@ class PeerNode:
             local_node_id=self.node_id,
         )
         return await lookup.execute()
+
+    async def join_mesh(
+        self,
+        seeds: list[str | tuple[str, int]],
+        *,
+        timeout: float = 5.0,
+        discover_peers: bool = True,
+    ) -> list[Any]:
+        """
+        Join a MeshWeaver network via one or more bootstrap seed nodes.
+
+        Connects to each seed endpoint, negotiates handshake, registers peers,
+        and optionally queries seed nodes for closest DHT neighbors.
+        """
+        from meshweaver.peers import PeerEndpoint, PeerRecord
+
+        joined_records: list[PeerRecord] = []
+
+        for seed in seeds:
+            try:
+                endpoint = PeerEndpoint.from_address(seed)
+            except Exception as exc:
+                logger.warning("Invalid seed address '%s': %s", seed, exc)
+                continue
+
+            try:
+                conn = await self.connect_to_peer(
+                    endpoint.host,
+                    endpoint.port,
+                    timeout=timeout,
+                    do_handshake=True,
+                )
+                if conn.remote_peer_id:
+                    rec = self.peer_registry.get(conn.remote_peer_id)
+                    if rec is not None and rec not in joined_records:
+                        joined_records.append(rec)
+
+                # Optionally query seed for neighbors
+                if discover_peers:
+                    try:
+                        neighbors = await self.find_node_remote(
+                            conn,
+                            self.node_id,
+                            count=20,
+                            timeout=timeout,
+                        )
+                        for neighbor in neighbors:
+                            try:
+                                reg_rec = self.peer_registry.register(
+                                    neighbor.peer_id,
+                                    neighbor.host,
+                                    neighbor.port,
+                                    metadata=neighbor.metadata,
+                                )
+                                self.routing_table.add_contact(reg_rec.to_contact())
+                                if reg_rec not in joined_records:
+                                    joined_records.append(reg_rec)
+                            except Exception:
+                                pass
+                    except Exception as disc_exc:
+                        logger.debug("Discovery query failed on seed %s: %s", endpoint, disc_exc)
+
+            except Exception as conn_exc:
+                logger.warning("Failed to connect to seed peer %s: %s", endpoint, conn_exc)
+
+        # Trigger immediate gossip round if enabled
+        if self.gossip_engine is not None and self.gossip_engine.is_running:
+            try:
+                await self.gossip_engine.run_round()
+            except Exception:
+                pass
+
+        logger.info(
+            "Node %s joined mesh. Discovered/registered %d peer(s)",
+            self.peer_id,
+            len(joined_records),
+        )
+        return joined_records
+
+    async def leave_mesh(
+        self,
+        *,
+        graceful: bool = True,
+        timeout: float = 2.0,
+    ) -> None:
+        """
+        Leave the MeshWeaver network, announcing departure to active peers
+        and performing an orderly shutdown.
+        """
+        if graceful and self._peer_connections:
+            leave_msg = Message.create(
+                MessageType.LEAVE,
+                sender_id=self.peer_id,
+                payload={"node_id": self.peer_id, "reason": "leaving"},
+            )
+            conns = list(self._peer_connections.values())
+            for conn in conns:
+                if not conn.is_closed:
+                    try:
+                        await asyncio.wait_for(conn.send(leave_msg), timeout=timeout)
+                    except Exception:
+                        pass
+
+            # Brief pause for socket transmission before shutting down
+            await asyncio.sleep(0.05)
+
+        logger.info("Node %s leaving mesh", self.peer_id)
+        await self.stop()

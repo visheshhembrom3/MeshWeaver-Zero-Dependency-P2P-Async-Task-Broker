@@ -38,6 +38,7 @@ class MessageType(StrEnum):
     GOSSIP = "GOSSIP"
     FIND_NODE = "FIND_NODE"
     NODES_FOUND = "NODES_FOUND"
+    LEAVE = "LEAVE"
     ERROR = "ERROR"
 
 
@@ -207,6 +208,11 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
             peer_id = node.get("peer_id") or node.get("node_id")
             if not isinstance(peer_id, str) or not peer_id.strip():
                 raise InvalidPayloadError("Each node in 'nodes' must have a non-empty 'peer_id' or 'node_id'")
+
+    elif message_type == MessageType.LEAVE:
+        node_id = payload.get("node_id")
+        if node_id is not None and (not isinstance(node_id, str) or not node_id.strip()):
+            raise InvalidPayloadError("LEAVE payload 'node_id' must be a non-empty string if provided")
 
 
 @dataclass(frozen=True, slots=True)
