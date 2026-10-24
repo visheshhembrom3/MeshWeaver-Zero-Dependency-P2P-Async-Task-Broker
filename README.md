@@ -149,6 +149,60 @@ Use `-v` or `--verbose` for detailed network framing and event logs:
 python examples/two_peers.py --verbose
 ```
 
+### Running the Multi-Node Discovery and Gossip Demonstration
+
+Demonstrate three or more local MeshWeaver nodes binding dynamic loopback ports, completing bootstrap discovery via seed nodes, executing iterative DHT peer lookups, exchanging workload metrics via gossip, reporting unified node status, and executing graceful shutdown:
+
+```bash
+# Run multi-node mesh demonstration (Bootstrap + Worker 1 + Worker 2):
+python examples/multi_node.py
+
+# Run with custom JSON configuration:
+python examples/multi_node.py --config examples/mesh_config.json
+
+# Output structured JSON status snapshot:
+python examples/multi_node.py --json
+
+# Enable verbose debug logs:
+python examples/multi_node.py --verbose
+
+# Run via package CLI entrypoint:
+python -m meshweaver --multi-node
+python -m meshweaver demo --multi-node
+```
+
+### Example Mesh Configuration
+
+The multi-node cluster can be configured via a JSON configuration file (e.g. `examples/mesh_config.json`):
+
+```json
+{
+  "network": {
+    "host": "127.0.0.1",
+    "connection_timeout": 3.0,
+    "request_timeout": 3.0
+  },
+  "gossip": {
+    "interval": 0.2,
+    "fanout": 2,
+    "stale_threshold": 30.0,
+    "ttl": 60.0,
+    "max_hops": 3
+  },
+  "dht": {
+    "alpha": 3,
+    "k": 20,
+    "query_timeout": 2.0,
+    "overall_timeout": 4.0
+  },
+  "nodes": [
+    { "peer_id": "bootstrap-node", "port": 0, "role": "bootstrap_seed", "is_seed": true },
+    { "peer_id": "worker-node-1", "port": 0, "role": "compute_worker", "is_seed": false },
+    { "peer_id": "worker-node-2", "port": 0, "role": "compute_worker", "is_seed": false }
+  ]
+}
+```
+
 ### Inspecting Node and Peer Status
 
 Inspect the local node and mesh peers directly from the CLI:
@@ -174,14 +228,14 @@ python -m meshweaver status --seeds 127.0.0.1:8001
 - [x] **Validated task schemas & registry:** Created `TaskRequest`, `TaskResponse`, `TaskErrorInfo`, and `TaskRegistry` with strict identifier safety, 64 KB size limits, and code injection prevention.
 - [x] **Two-peer communication demonstration:** Created `examples/two_peers.py` and integration tests demonstrating handshake, ping/pong exchange, local task execution, error handling, and orderly shutdown.
 
-### Week 2 — Discovery and Workload Sharing (In Progress)
+### Week 2 — Discovery and Workload Sharing (Completed)
 - [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
 - [x] **DHT-inspired peer discovery & routing table:** Implemented 160-bit `NodeID` keyspace, deterministic XOR distance metric, `KBucket` routing buckets with LRU ordering and replacement caching, 160-bucket `RoutingTable` partitioned by Common Prefix Length (CPL), closest-peer selection, duplicate suppression, bounded queries, and resilient iterative lookup with timeouts.
 - [x] **Routing-table and DHT tests:** Added comprehensive unit and integration tests for XOR distance metric properties, bucket management (capacity, LRU ordering, updates, promotions), peer lookup, and unavailable/unresponsive peers.
 - [x] **Gossip-based resource reporting:** Implemented asynchronous `GossipEngine`, `ResourceCollector`, `GossipStore`, and `NodeResourceReport` periodically sharing CPU, RAM, active task count, node identity, timestamp, and health status with bounded fanout peers.
 - [x] **Workload gossip & anti-amplification:** Built strict monotonic report validation, clock skew rejection, stale record discarding, TTL expiration, and amplification bounds (`fanout`, `max_hops`, seen cache, and sender exclusion).
 - [x] **Node status and registry API:** Integrated peer discovery, registry membership, and gossip records into a clean internal `NodeStatusAPI`, `NodeStatusSnapshot`, and `PeerStatus`. Exposes registered peers, last-seen timestamps, reported resource metrics, peer health, active socket connections, and DHT proximity. Added structured logging and CLI `status` command (`--json`, `--seeds`).
-- [ ] Run a multi-node local network experiment and document results.
+- [x] **Multi-node networking & gossip verification (Milestone 5):** Built automated integration tests and a deterministic loopback demonstration starting at least three MeshWeaver nodes. Verified bootstrap discovery, peer lookup, gossip exchange, node-status reporting, and graceful shutdown without Internet access. Added example configuration (`examples/mesh_config.json`) and documented run commands.
 
 ### Gossip-Based Workload & Resource Monitoring
 

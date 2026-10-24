@@ -1048,30 +1048,33 @@ class GossipEngine:
         if exclude:
             exclude_set.update(exclude)
 
-        candidates: list[tuple[str, str, int]] = []
+        candidates: dict[str, tuple[str, int]] = {}
 
         # 1. From connected peers if peer_node is available
         if self.peer_node is not None:
             for peer_id, conn in self.peer_node.connected_peers.items():
                 if peer_id not in exclude_set and not conn.is_closed:
-                    host, port = conn.peer_address
-                    candidates.append((peer_id, host, port))
+                    rec = self.peer_registry.get(peer_id)
+                    if rec is not None:
+                        candidates[peer_id] = (rec.host, rec.port)
+                    else:
+                        candidates[peer_id] = conn.peer_address
 
         # 2. From peer_registry
         for record in self.peer_registry.list_active_peers():
-            if record.peer_id not in exclude_set:
-                item = (record.peer_id, record.host, record.port)
-                if item not in candidates:
-                    candidates.append(item)
+            if record.peer_id not in exclude_set and record.peer_id not in candidates:
+                candidates[record.peer_id] = (record.host, record.port)
 
         if not candidates:
             return []
 
-        # Bound selection to fanout limit
-        if len(candidates) <= self.fanout:
-            return candidates
+        candidate_list = [(pid, host, port) for pid, (host, port) in candidates.items()]
 
-        return random.sample(candidates, self.fanout)
+        # Bound selection to fanout limit
+        if len(candidate_list) <= self.fanout:
+            return candidate_list
+
+        return random.sample(candidate_list, self.fanout)
 
     async def run_round(self, current_time: float | None = None) -> int:
         """

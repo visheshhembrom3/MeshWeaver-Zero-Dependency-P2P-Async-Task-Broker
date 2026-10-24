@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MeshWeaver Multi-Node Mesh Configuration",
+  "description": "Example loopback deployment configuration for local multi-node MeshWeaver testing and demonstration.",
+  "network": {
+    "host": "127.0.0.1",
+    "connection_timeout": 3.0,
+    "request_timeout": 3.0
+  },
+  "gossip": {
+    "interval": 0.2,
+    "fanout": 2,
+    "stale_threshold": 30.0,
+    "ttl": 60.0,
+    "max_hops": 3
+  },
+  "dht": {
+    "alpha": 3,
+    "k": 20,
+    "query_timeout": 2.0,
+    "overall_timeout": 4.0
+  },
+  "nodes": [
+    {
+      "peer_id": "bootstrap-node",
+      "port": 0,
+      "role": "bootstrap_seed",
+      "is_seed": true
+    },
+    {
+      "peer_id": "worker-node-1",
+      "port": 0,
+      "role": "compute_worker",
+      "is_seed": false
+    },
+    {
+      "peer_id": "worker-node-2",
+      "port": 0,
+      "role": "compute_worker",
+      "is_seed": false
+    }
+  ]
+}

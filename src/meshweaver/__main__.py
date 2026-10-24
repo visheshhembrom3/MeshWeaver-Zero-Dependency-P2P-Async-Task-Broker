@@ -79,6 +79,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the two-peer local communication demonstration",
     )
     parser.add_argument(
+        "--multi-node",
+        "--demo-mesh",
+        dest="multi_node",
+        action="store_true",
+        help="Run the multi-node discovery and gossip demonstration",
+    )
+    parser.add_argument(
+        "--config",
+        dest="config_path",
+        default=None,
+        help="Optional path to JSON configuration file for multi-node demo",
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Print current node and mesh peer status",
@@ -176,7 +189,25 @@ def main(argv: list[str] | None = None) -> int:
 
     demo_parser = subparsers.add_parser(
         "demo",
-        help="Run the two-peer local communication demonstration",
+        help="Run MeshWeaver local demonstrations",
+    )
+    demo_parser.add_argument(
+        "--multi-node",
+        "--mesh",
+        action="store_true",
+        dest="multi_node",
+        help="Run the multi-node discovery and gossip demonstration",
+    )
+    demo_parser.add_argument(
+        "--config",
+        dest="config_path",
+        default=None,
+        help="Optional path to JSON configuration file for multi-node demo",
+    )
+    demo_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output demo results as JSON",
     )
     demo_parser.add_argument(
         "--verbose",
@@ -186,7 +217,26 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(raw_args)
 
-    # 1. Demo mode
+    # 1. Multi-node demo mode
+    if getattr(args, "multi_node", False):
+        workspace_root = Path(__file__).resolve().parent.parent.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+
+        from examples.multi_node import run_multi_node_demo
+
+        config_file = getattr(args, "config_path", None)
+        as_json = getattr(args, "json", False)
+        asyncio.run(
+            run_multi_node_demo(
+                host=getattr(args, "host", "127.0.0.1"),
+                config_path=config_file,
+                as_json=as_json,
+            )
+        )
+        return 0
+
+    # 2. Two-peer demo mode
     if args.demo or getattr(args, "command", None) == "demo":
         workspace_root = Path(__file__).resolve().parent.parent.parent
         if str(workspace_root) not in sys.path:

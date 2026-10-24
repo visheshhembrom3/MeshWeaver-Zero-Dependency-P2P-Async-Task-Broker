@@ -685,8 +685,9 @@ class PeerNode:
                 records = await self.find_node_remote(conn, tgt, count=k, timeout=query_timeout)
                 for rec in records:
                     try:
-                        self.peer_registry.register(rec.peer_id, rec.host, rec.port, metadata=rec.metadata)
-                        self.routing_table.add_contact(rec.to_contact())
+                        if rec.peer_id != self.peer_id:
+                            self.peer_registry.register(rec.peer_id, rec.host, rec.port, metadata=rec.metadata)
+                            self.routing_table.add_contact(rec.to_contact())
                     except Exception:
                         pass
                 return records
@@ -755,15 +756,16 @@ class PeerNode:
                         )
                         for neighbor in neighbors:
                             try:
-                                reg_rec = self.peer_registry.register(
-                                    neighbor.peer_id,
-                                    neighbor.host,
-                                    neighbor.port,
-                                    metadata=neighbor.metadata,
-                                )
-                                self.routing_table.add_contact(reg_rec.to_contact())
-                                if reg_rec not in joined_records:
-                                    joined_records.append(reg_rec)
+                                if neighbor.peer_id != self.peer_id:
+                                    reg_rec = self.peer_registry.register(
+                                        neighbor.peer_id,
+                                        neighbor.host,
+                                        neighbor.port,
+                                        metadata=neighbor.metadata,
+                                    )
+                                    self.routing_table.add_contact(reg_rec.to_contact())
+                                    if reg_rec not in joined_records:
+                                        joined_records.append(reg_rec)
                             except Exception:
                                 pass
                     except Exception as disc_exc:

@@ -847,6 +847,14 @@ class RoutingTable:
 
         return None
 
+    def has_contact(self, node_id: NodeID | str) -> bool:
+        """Return True if a contact with the given NodeID or peer_id exists in the routing table."""
+        return self.get_contact(node_id) is not None
+
+    def __contains__(self, node_id: NodeID | str) -> bool:
+        """Return True if contact exists in routing table."""
+        return self.has_contact(node_id)
+
     def all_contacts(self) -> list[PeerContact]:
         """Return a flat list of all contacts stored in the routing table."""
         result: list[PeerContact] = []
