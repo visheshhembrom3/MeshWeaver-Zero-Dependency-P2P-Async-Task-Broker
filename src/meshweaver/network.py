@@ -143,6 +143,7 @@ class PeerNode:
         port: int = 0,
         *,
         peer_registry: PeerRegistry | None = None,
+        task_registry: Any | None = None,
     ) -> None:
         self.peer_id: str = peer_id if peer_id and peer_id.strip() else uuid.uuid4().hex[:12]
         self.host: str = host
@@ -164,6 +165,19 @@ class PeerNode:
         self._pending_requests: dict[str, asyncio.Future[Message]] = {}
         # Registered message handlers
         self._handlers: dict[MessageType, MessageHandler] = {}
+
+        # Task registry for local task execution
+        from meshweaver.tasks import TaskRegistry
+
+        self.task_registry: TaskRegistry = (
+            task_registry if task_registry is not None else TaskRegistry.create_default()
+        )
+        self._active_task_counter: int = 0
+
+        # Load-aware task router
+        from meshweaver.routing import TaskRouter
+
+        self.task_router: TaskRouter = TaskRouter(self)
 
         # Register default protocol handlers
         self._register_default_handlers()
@@ -221,12 +235,25 @@ class PeerNode:
         """Return PeerStatus for a specific peer, or None if not found."""
         return self.status_api.get_peer_status(peer_id, current_time=current_time)
 
+    @property
+    def active_task_count(self) -> int:
+        """Return the count of currently executing tasks on this node."""
+        return self._active_task_counter
+
+    def register_task(
+        self,
+        name_or_func: Any = None,
+        handler: Any = None,
+    ) -> Any:
+        """Register a local task handler in this node's TaskRegistry."""
+        return self.task_registry.register(name_or_func, handler)
+
     def register_handler(self, msg_type: MessageType, handler: MessageHandler) -> None:
         """Register a handler callback for incoming messages of a given MessageType."""
         self._handlers[msg_type] = handler
 
     def _register_default_handlers(self) -> None:
-        """Install built-in protocol handlers (PING and HANDSHAKE)."""
+        """Install built-in protocol handlers (PING, HANDSHAKE, and TASK_REQUEST)."""
 
         async def _handle_ping(msg: Message, _conn: PeerConnection) -> Message:
             return Message.create(
@@ -255,6 +282,35 @@ class PeerNode:
                 recipient_id=remote_node_id,
                 correlation_id=msg.message_id,
                 payload={"node_id": self.peer_id, "status": "accepted"},
+            )
+
+        async def _handle_task_request(msg: Message, _conn: PeerConnection) -> Message:
+            from meshweaver.exceptions import InvalidTaskError, ValidationError
+            from meshweaver.tasks import TaskErrorInfo, TaskRequest, TaskResponse
+
+            try:
+                task_req = TaskRequest.from_message(msg)
+            except (InvalidTaskError, ValidationError, Exception) as parse_exc:
+                err_resp = TaskResponse.error(
+                    task_id=str(msg.payload.get("task_id", uuid.uuid4().hex)),
+                    error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(parse_exc)),
+                )
+                return err_resp.to_message(
+                    sender_id=self.peer_id,
+                    recipient_id=msg.sender_id,
+                    correlation_id=msg.message_id,
+                )
+
+            self._active_task_counter += 1
+            try:
+                task_resp = await self.task_registry.execute(task_req)
+            finally:
+                self._active_task_counter = max(0, self._active_task_counter - 1)
+
+            return task_resp.to_message(
+                sender_id=self.peer_id,
+                recipient_id=msg.sender_id,
+                correlation_id=msg.message_id,
             )
 
         async def _handle_find_node(msg: Message, _conn: PeerConnection) -> Message:
@@ -314,6 +370,7 @@ class PeerNode:
 
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
+        self.register_handler(MessageType.TASK_REQUEST, _handle_task_request)
         self.register_handler(MessageType.FIND_NODE, _handle_find_node)
         self.register_handler(MessageType.GOSSIP, _handle_gossip)
         self.register_handler(MessageType.LOAD_REPORT, _handle_load_report)
@@ -338,6 +395,10 @@ class PeerNode:
         if self.gossip_engine is not None:
             return self.gossip_engine
 
+        resolved_task_provider = (
+            task_count_provider if task_count_provider is not None else (lambda: self._active_task_counter)
+        )
+
         self.gossip_engine = GossipEngine(
             node_id=self.peer_id,
             peer_node=self,
@@ -348,7 +409,7 @@ class PeerNode:
             ttl=ttl,
             max_hops=max_hops,
             collector=collector,
-            task_count_provider=task_count_provider,
+            task_count_provider=resolved_task_provider,
         )
         if self._is_running:
             self.gossip_engine.start()
@@ -608,6 +669,178 @@ class PeerNode:
     async def send_message(self, connection: PeerConnection, message: Message) -> None:
         """Send a one-way message over an existing connection without awaiting reply."""
         await connection.send(message)
+
+    async def submit_task(
+        self,
+        task_name_or_request: str | Any,
+        *args: Any,
+        target_peer_id: str | None = None,
+        timeout: float = 5.0,
+        task_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        retry_on_failure: bool = True,
+        max_candidates: int = 3,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Submit a task for remote execution across the mesh.
+
+        Selects the best available candidate peer (or routes to target_peer_id),
+        dispatches the task over an asynchronous TCP stream, and awaits the result.
+        Gracefully handles invalid task schemas, unreachable peers (with optional
+        failover retry), and timeouts, returning a structured TaskResponse.
+        """
+        from meshweaver.exceptions import (
+            InvalidTaskError,
+            NetworkTimeoutError,
+            ValidationError,
+        )
+        from meshweaver.tasks import TaskErrorInfo, TaskRequest, TaskResponse
+
+        # 1. Parse or create validated TaskRequest
+        if isinstance(task_name_or_request, TaskRequest):
+            req = task_name_or_request
+        else:
+            try:
+                req = TaskRequest.create(
+                    task_name=str(task_name_or_request),
+                    args=args if args else None,
+                    kwargs=kwargs if kwargs else None,
+                    task_id=task_id,
+                    metadata=metadata,
+                )
+            except (InvalidTaskError, ValidationError) as exc:
+                return TaskResponse.error(
+                    task_id=task_id if task_id else uuid.uuid4().hex,
+                    error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(exc)),
+                )
+            except Exception as exc:
+                return TaskResponse.error(
+                    task_id=task_id if task_id else uuid.uuid4().hex,
+                    error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(exc)),
+                )
+
+        # 2. Identify candidate peers
+        candidates: list[tuple[str, str, int]] = []
+        if target_peer_id is not None:
+            if target_peer_id == self.peer_id:
+                # Local execution
+                return await self.task_registry.execute(req)
+
+            rec = self.peer_registry.get(target_peer_id)
+            if rec is not None:
+                candidates.append((rec.peer_id, rec.host, rec.port))
+            else:
+                conn = self._peer_connections.get(target_peer_id)
+                if conn is not None and not conn.is_closed:
+                    addr = conn.peer_address
+                    candidates.append((target_peer_id, addr[0], addr[1]))
+                else:
+                    return TaskResponse.error(
+                        task_id=req.task_id,
+                        error=TaskErrorInfo(
+                            code="PEER_UNAVAILABLE",
+                            message=f"Target peer '{target_peer_id}' is not found or reachable in mesh",
+                        ),
+                    )
+        else:
+            # Select candidate peers via task_router
+            candidate_records = self.task_router.select_candidates(
+                req,
+                count=max_candidates,
+                exclude=[self.peer_id],
+            )
+            if not candidate_records:
+                return TaskResponse.error(
+                    task_id=req.task_id,
+                    error=TaskErrorInfo(
+                        code="NO_PEERS_AVAILABLE",
+                        message="No available or reachable worker peers found in mesh to route task",
+                    ),
+                )
+            candidates = [(c.peer_id, c.host, c.port) for c in candidate_records]
+
+        # 3. Dispatch task to candidate peer (with failover)
+        last_error: TaskErrorInfo | None = None
+        for candidate_id, host, port in candidates:
+            conn = self._peer_connections.get(candidate_id)
+
+            if conn is None or conn.is_closed:
+                try:
+                    conn = await self.connect_to_peer(host, port, timeout=timeout, do_handshake=True)
+                except Exception as conn_exc:
+                    logger.warning(
+                        "Failed to connect to candidate worker %s (%s:%d): %s",
+                        candidate_id,
+                        host,
+                        port,
+                        conn_exc,
+                    )
+                    last_error = TaskErrorInfo(
+                        code="PEER_UNREACHABLE",
+                        message=f"Failed to connect to worker peer {candidate_id} at {host}:{port}: {conn_exc}",
+                    )
+                    if retry_on_failure:
+                        continue
+                    break
+
+            msg = req.to_message(sender_id=self.peer_id, recipient_id=candidate_id)
+            try:
+                resp_msg = await self.send_request(conn, msg, timeout=timeout)
+            except NetworkTimeoutError as timeout_exc:
+                logger.warning("Task execution timed out on worker %s: %s", candidate_id, timeout_exc)
+                last_error = TaskErrorInfo(
+                    code="TASK_TIMEOUT",
+                    message=f"Task execution on worker {candidate_id} timed out after {timeout}s",
+                )
+                if retry_on_failure:
+                    continue
+                break
+            except Exception as net_exc:
+                logger.warning("Communication error during task exchange with %s: %s", candidate_id, net_exc)
+                last_error = TaskErrorInfo(
+                    code="COMMUNICATION_ERROR",
+                    message=f"Communication error with worker {candidate_id}: {net_exc}",
+                )
+                if retry_on_failure:
+                    continue
+                break
+
+            if resp_msg.message_type == MessageType.TASK_RESPONSE:
+                try:
+                    return TaskResponse.from_message(resp_msg)
+                except Exception as parse_exc:
+                    return TaskResponse.error(
+                        task_id=req.task_id,
+                        error=TaskErrorInfo(
+                            code="INVALID_RESPONSE",
+                            message=f"Malformed task response from {candidate_id}: {parse_exc}",
+                        ),
+                    )
+            elif resp_msg.message_type == MessageType.ERROR:
+                return TaskResponse.error(
+                    task_id=req.task_id,
+                    error=TaskErrorInfo(
+                        code=str(resp_msg.payload.get("code", "REMOTE_ERROR")),
+                        message=str(resp_msg.payload.get("message", "Remote peer returned an error")),
+                    ),
+                )
+            else:
+                return TaskResponse.error(
+                    task_id=req.task_id,
+                    error=TaskErrorInfo(
+                        code="UNEXPECTED_MESSAGE_TYPE",
+                        message=f"Received unexpected message type {resp_msg.message_type} from {candidate_id}",
+                    ),
+                )
+
+        return TaskResponse.error(
+            task_id=req.task_id,
+            error=last_error if last_error else TaskErrorInfo(
+                code="ROUTING_FAILED",
+                message="Failed to route task to any candidate peer",
+            ),
+        )
 
     async def find_node_remote(
         self,

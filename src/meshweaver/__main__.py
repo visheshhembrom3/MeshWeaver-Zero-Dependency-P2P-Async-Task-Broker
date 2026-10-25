@@ -60,6 +60,56 @@ async def run_status_cmd(
         await node.stop()
 
 
+async def run_submit_cmd(
+    task_name: str,
+    args_list: list[str],
+    seeds: list[str],
+    host: str = "127.0.0.1",
+    port: int = 0,
+    peer_id: str | None = None,
+    as_json: bool = False,
+    timeout: float = 5.0,
+    verbose: bool = False,
+) -> int:
+    """Start local peer node, discover mesh, submit task, and print result."""
+    import json
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+
+    setup_structured_logging(verbose=verbose, as_json=as_json)
+
+    assigned_id = peer_id if peer_id else f"cli-client-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id)
+    node.enable_gossip()
+    await node.start()
+    try:
+        if seeds:
+            await node.join_mesh(seeds, timeout=timeout)
+            await asyncio.sleep(0.15)
+
+        # Parse string args into ints/floats/json if possible
+        parsed_args: list[Any] = []
+        for a in args_list:
+            try:
+                parsed_args.append(json.loads(a))
+            except Exception:
+                parsed_args.append(a)
+
+        resp = await node.submit_task(task_name, *parsed_args, timeout=timeout)
+        if as_json:
+            print(resp.to_json())
+        else:
+            if resp.status.value == "success":
+                print(f"[SUCCESS] Task ID: {resp.task_id} | Result: {resp.result}")
+            else:
+                err_msg = resp.error.message if resp.error else "Unknown error"
+                err_code = resp.error.code if resp.error else "ERROR"
+                print(f"[{resp.status.value.upper()}] Task ID: {resp.task_id} | Code: {err_code} | Error: {err_msg}")
+        return 0 if resp.status.value == "success" else 1
+    finally:
+        await node.stop()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Execute the MeshWeaver CLI entrypoint."""
     raw_args = list(sys.argv[1:] if argv is None else argv)
@@ -84,6 +134,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="multi_node",
         action="store_true",
         help="Run the multi-node discovery and gossip demonstration",
+    )
+    parser.add_argument(
+        "--tasks",
+        "--remote-tasks",
+        "--demo-tasks",
+        dest="remote_tasks",
+        action="store_true",
+        help="Run the end-to-end remote task execution demonstration",
     )
     parser.add_argument(
         "--config",
@@ -199,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the multi-node discovery and gossip demonstration",
     )
     demo_parser.add_argument(
+        "--tasks",
+        "--remote-tasks",
+        dest="remote_tasks",
+        action="store_true",
+        help="Run the end-to-end remote task execution demonstration",
+    )
+    demo_parser.add_argument(
         "--config",
         dest="config_path",
         default=None,
@@ -215,9 +280,42 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable verbose debug logging",
     )
 
+    submit_parser = subparsers.add_parser(
+        "submit",
+        help="Submit a task for remote execution across the mesh",
+    )
+    submit_parser.add_argument("task_name", help="Registered task name (e.g. add, reverse_string, echo, ping)")
+    submit_parser.add_argument("task_args", nargs="*", default=[], help="Positional arguments for the task")
+    submit_parser.add_argument("--seeds", required=True, help="Comma-separated bootstrap seed peer addresses")
+    submit_parser.add_argument("--host", default="127.0.0.1", help="Local network host interface")
+    submit_parser.add_argument("--port", type=int, default=0, help="Local network port to bind")
+    submit_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local peer identifier")
+    submit_parser.add_argument("--json", action="store_true", help="Output task response as JSON")
+    submit_parser.add_argument("--timeout", type=float, default=5.0, help="Task timeout in seconds")
+    submit_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+
     args = parser.parse_args(raw_args)
 
-    # 1. Multi-node demo mode
+    # 1. Remote tasks demo mode
+    if getattr(args, "remote_tasks", False) or (
+        getattr(args, "command", None) == "demo" and getattr(args, "remote_tasks", False)
+    ):
+        workspace_root = Path(__file__).resolve().parent.parent.parent
+        if str(workspace_root) not in sys.path:
+            sys.path.insert(0, str(workspace_root))
+
+        from examples.remote_tasks import run_remote_tasks_demo
+
+        as_json = getattr(args, "json", False)
+        res = asyncio.run(
+            run_remote_tasks_demo(
+                host=getattr(args, "host", "127.0.0.1"),
+                as_json=as_json,
+            )
+        )
+        return 0 if res.get("teardown_ok", False) else 1
+
+    # 2. Multi-node demo mode
     if getattr(args, "multi_node", False):
         workspace_root = Path(__file__).resolve().parent.parent.parent
         if str(workspace_root) not in sys.path:
@@ -236,8 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    # 2. Two-peer demo mode
-    if args.demo or getattr(args, "command", None) == "demo":
+    # 3. Two-peer demo mode
+    if args.demo or (getattr(args, "command", None) == "demo" and not getattr(args, "multi_node", False) and not getattr(args, "remote_tasks", False)):
         workspace_root = Path(__file__).resolve().parent.parent.parent
         if str(workspace_root) not in sys.path:
             sys.path.insert(0, str(workspace_root))
@@ -247,7 +345,24 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_two_peers_demo())
         return 0
 
-    # 2. Status command
+    # 4. Submit task subcommand
+    if getattr(args, "command", None) == "submit":
+        seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+        return asyncio.run(
+            run_submit_cmd(
+                task_name=args.task_name,
+                args_list=getattr(args, "task_args", []),
+                seeds=seed_list,
+                host=args.host,
+                port=args.port,
+                peer_id=args.peer_id,
+                as_json=args.json,
+                timeout=args.timeout,
+                verbose=args.verbose,
+            )
+        )
+
+    # 5. Status command
     if getattr(args, "command", None) == "status" or args.status:
         seed_list = None
         if args.seeds:
@@ -265,11 +380,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # 3. Default banner output when no flags/subcommands provided
+    # 6. Default banner output when no flags/subcommands provided
     print(f"MeshWeaver: Zero-Dependency P2P Async Task Broker (v{__version__})")
     print(
         "Run tests with 'pytest'. To see peer status: python -m meshweaver status. "
-        "To see the demo: python -m meshweaver --demo"
+        "To see the task demo: python -m meshweaver --tasks"
     )
     return 0
 

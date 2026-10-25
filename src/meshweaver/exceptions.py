@@ -63,6 +63,18 @@ class TaskExecutionError(TaskError):
     """Raised when an error occurs during local execution of a registered task."""
 
 
+class TaskRoutingError(TaskError):
+    """Raised when an error occurs while routing a task to peers."""
+
+
+class NoAvailablePeerError(TaskRoutingError):
+    """Raised when no suitable or reachable peer is available to execute a task."""
+
+
+class TaskTimeoutError(NetworkTimeoutError, TaskError):
+    """Raised when remote task execution exceeds configured timeout."""
+
+
 class PeerRegistryError(MeshWeaverError):
     """Base exception for peer registry and membership tracking errors."""
 

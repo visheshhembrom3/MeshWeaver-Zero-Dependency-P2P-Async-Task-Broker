@@ -54,8 +54,8 @@ The diagram is conceptual. The actual network topology and implementation will e
 | Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach with 160-bit identifiers and XOR distance metric |
 | Workload gossip | Share approximate CPU and memory utilization with neighboring peers |
 | Task serialization | Define a structured, validated format for task requests and results |
-| Task routing | Select a suitable peer based on availability and reported load |
-| Fault monitoring | Use heartbeats and task timeouts to detect unresponsive peers |
+| Task routing | Select a suitable peer based on availability and reported load via `TaskRouter` and `LoadAwareRoutingStrategy` |
+| Fault monitoring | Use heartbeats, timeouts, and automatic candidate failover to detect and recover from unresponsive peers |
 | CLI | Start nodes, submit tasks, and inspect status |
 | Web dashboard | Visualize peers, task states, and network activity |
 
@@ -218,6 +218,30 @@ python -m meshweaver status --json
 python -m meshweaver status --seeds 127.0.0.1:8001
 ```
 
+### Running the End-to-End Remote Task Execution Demonstration
+
+Demonstrate multi-node task distribution, load-aware worker routing, strict execution boundaries, worker failover resilience, and graceful teardown:
+
+```bash
+# Run the remote task execution demonstration:
+python examples/remote_tasks.py
+
+# Run via package CLI entrypoint:
+python -m meshweaver --tasks
+python -m meshweaver demo --tasks
+
+# Emit structured JSON demonstration results:
+python examples/remote_tasks.py --json
+python -m meshweaver --tasks --json
+
+# Enable verbose debug logs:
+python examples/remote_tasks.py --verbose
+
+# Submit a task directly to a running mesh cluster:
+python -m meshweaver submit add 125 375 --seeds 127.0.0.1:8001
+python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
+```
+
 ## Roadmap
 
 ### Week 1 — Networking Foundation (Completed)
@@ -236,6 +260,20 @@ python -m meshweaver status --seeds 127.0.0.1:8001
 - [x] **Workload gossip & anti-amplification:** Built strict monotonic report validation, clock skew rejection, stale record discarding, TTL expiration, and amplification bounds (`fanout`, `max_hops`, seen cache, and sender exclusion).
 - [x] **Node status and registry API:** Integrated peer discovery, registry membership, and gossip records into a clean internal `NodeStatusAPI`, `NodeStatusSnapshot`, and `PeerStatus`. Exposes registered peers, last-seen timestamps, reported resource metrics, peer health, active socket connections, and DHT proximity. Added structured logging and CLI `status` command (`--json`, `--seeds`).
 - [x] **Multi-node networking & gossip verification (Milestone 5):** Built automated integration tests and a deterministic loopback demonstration starting at least three MeshWeaver nodes. Verified bootstrap discovery, peer lookup, gossip exchange, node-status reporting, and graceful shutdown without Internet access. Added example configuration (`examples/mesh_config.json`) and documented run commands.
+- [x] **End-to-end remote task execution & load-aware routing:** Implemented `TaskRouter`, `LoadAwareRoutingStrategy`, and `PeerNode.submit_task` integrating peer discovery, async TCP networking, workload gossip, and task serialization. Features composite load scoring (active tasks, CPU, memory, health status), automatic candidate failover retry, strict execution boundaries (only registered tasks execute, rejecting code/import injection), structured `TaskResponse` envelopes, and comprehensive multi-node integration tests.
+
+### Load-Aware Task Routing and Execution
+
+MeshWeaver provides an integrated decentralized task routing engine:
+
+| Mechanism | Description |
+|---|---|
+| **Composite Load Scoring** | Evaluates active task count (weight: 10.0), CPU percent (weight: 0.5), memory percent (weight: 0.5), and health status penalties (`DEGRADED`: +50, `UNHEALTHY`: +1000). Ranks candidate worker peers in ascending order of load score. |
+| **Deterministic Tie-Breaking** | Uses deterministic XOR distance between candidate node IDs and the task identifier anchor (`NodeID.from_peer(task_id)`) to break score ties evenly without hotspotting. |
+| **Automatic Failover Retry** | If connection or transmission to the primary candidate peer fails or times out, `submit_task` automatically fails over to the next best candidate peer. |
+| **Strict Execution Security** | Remote payloads can only execute explicitly registered handlers (`TaskRegistry`). Arbitrary Python imports, code objects, dunders, and reserved names (`eval`, `exec`, `os`, `sys`) are strictly rejected. |
+| **Structured Task Envelopes** | Requests and responses are encapsulated in validated `TaskRequest` and `TaskResponse` objects carrying unique task IDs, status (`success`, `failure`, `error`), result or `TaskErrorInfo`, execution timestamps, and metadata. |
+| **Observability & Inspection** | `TaskRouter.explain_routing()` emits structured breakdowns of evaluated peers, composite scores, active tasks, CPU/RAM, and health statuses for dashboards and logs. |
 
 ### Gossip-Based Workload & Resource Monitoring
 
