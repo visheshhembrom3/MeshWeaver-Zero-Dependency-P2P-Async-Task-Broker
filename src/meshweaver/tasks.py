@@ -924,3 +924,13 @@ class TaskRegistry:
             return s[::-1]
 
         return registry
+
+
+# Re-export asynchronous task execution engine for local/standalone execution
+from meshweaver.execution import (
+    DEFAULT_MAX_CONCURRENCY,
+    TaskExecution,
+    TaskExecutionEngine,
+    TaskRecord,
+    TaskState,
+)

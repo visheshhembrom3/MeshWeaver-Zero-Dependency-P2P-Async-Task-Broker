@@ -54,6 +54,7 @@ The diagram is conceptual. The actual network topology and implementation will e
 | Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach with 160-bit identifiers and XOR distance metric |
 | Workload gossip | Share approximate CPU and memory utilization with neighboring peers |
 | Task serialization | Define a structured, validated format for task requests and results |
+| Task execution engine | Local asyncio-based task queue, worker pool, concurrency control, lifecycle state management (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED), exception handling, and cancellation |
 | Task routing | Select a suitable peer based on availability and reported load via `TaskRouter` and `LoadAwareRoutingStrategy` |
 | Fault monitoring | Use heartbeats, timeouts, and automatic candidate failover to detect and recover from unresponsive peers |
 | CLI | Start nodes, submit tasks, and inspect status |
@@ -127,6 +128,51 @@ Run the test suite:
 
 ```bash
 pytest
+```
+
+### Running the Local Task Execution Engine Demonstration
+
+Demonstrate the standalone asynchronous task execution engine with an `asyncio` pending queue, configurable worker pool concurrency (`max_concurrency`), task lifecycle state transitions (`PENDING` -> `RUNNING` -> `COMPLETED`/`FAILED`/`CANCELLED`), exception boundaries, duration tracking, and orderly shutdown:
+
+```bash
+# Run local asynchronous task execution demonstration:
+python examples/local_task_execution.py
+
+# Run with custom worker concurrency:
+python examples/local_task_execution.py --concurrency 4
+```
+
+### Local Asynchronous Task Execution Example
+
+MeshWeaver's `TaskExecutionEngine` is decoupled from the networking layer, allowing developers to execute and test tasks locally using Python's standard `asyncio`:
+
+```python
+import asyncio
+from meshweaver import TaskExecutionEngine, TaskState
+
+async def main() -> None:
+    # 1. Initialize engine with worker concurrency limit
+    async with TaskExecutionEngine(max_concurrency=2) as engine:
+        # 2. Register custom synchronous or asynchronous tasks
+        @engine.register("multiply")
+        async def multiply(a: int, b: int) -> int:
+            await asyncio.sleep(0.01)
+            return a * b
+
+        # 3. Submit built-in example tasks and custom tasks
+        task_add = await engine.submit("add", 15, 27)
+        task_rev = await engine.submit("reverse_string", "MeshWeaver")
+        task_mult = await engine.submit("multiply", 6, 7)
+
+        # 4. Await task completion
+        await asyncio.gather(task_add.wait(), task_rev.wait(), task_mult.wait())
+
+        # 5. Inspect results, states, and duration
+        print(f"Task ID: {task_add.task_id} -> Result: {task_add.result} [{task_add.state}] (took {task_add.duration:.4f}s)")
+        print(f"Task ID: {task_rev.task_id} -> Result: {task_rev.result} [{task_rev.state}]")
+        print(f"Task ID: {task_mult.task_id} -> Result: {task_mult.result} [{task_mult.state}]")
+
+asyncio.run(main())
 ```
 
 ### Running the Two-Peer Demonstration
@@ -250,7 +296,23 @@ python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
 - [x] **Async message protocol:** Implemented length-prefixed binary framing, 10 MB frame limits, and JSON-serialized `Message` envelopes.
 - [x] **Async peer networking:** Built `PeerNode` and `PeerConnection` with non-blocking stream handling, dynamic port binding, handshake negotiation, and correlated request-response matching.
 - [x] **Validated task schemas & registry:** Created `TaskRequest`, `TaskResponse`, `TaskErrorInfo`, and `TaskRegistry` with strict identifier safety, 64 KB size limits, and code injection prevention.
+- [x] **Asynchronous task execution engine:** Implemented standalone `TaskExecutionEngine` with an `asyncio`-based pending queue, worker pool with configurable concurrency (`max_concurrency`), strict lifecycle task states (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`), monotonic duration/timestamps, exception and error boundary handling, graceful shutdown, and local task cancellation.
 - [x] **Two-peer communication demonstration:** Created `examples/two_peers.py` and integration tests demonstrating handshake, ping/pong exchange, local task execution, error handling, and orderly shutdown.
+
+### Asynchronous Task Execution Engine
+
+MeshWeaver's local task engine decouples task scheduling and execution from network transport:
+
+| Mechanism | Description |
+|---|---|
+| **Unique Task IDs** | Every submitted task receives a unique validated identifier (`task_id`), either user-specified or automatically generated as a UUID hex. |
+| **Asyncio Pending Queue** | Uncompleted tasks wait in an `asyncio.Queue` pending execution, decoupling task ingestion rate from worker execution speed. |
+| **Strict Lifecycle States** | Tasks deterministically transition through `PENDING` -> `RUNNING` -> `COMPLETED`, `FAILED`, or `CANCELLED`. |
+| **Worker Concurrency Control** | Background worker coroutines bounded by `max_concurrency` process tasks without thread-safety overhead or runaway concurrency. |
+| **Security & Safety Boundaries** | Only functions explicitly registered in `TaskRegistry` can execute. Arbitrary code, unpickled objects, dunder keys, and dangerous names (`eval`, `exec`, `os`, `sys`) are blocked. |
+| **Result & Error Isolation** | Synchronous and asynchronous exceptions are safely caught and encapsulated in `TaskErrorInfo` without crashing worker loops or leaking host internals. |
+| **Timestamps & Durations** | Monotonic timestamps (`created_at`, `started_at`, `completed_at`) and duration calculations record sub-millisecond execution metrics. |
+| **Graceful Shutdown & Cancellation** | Supports orderly shutdown (`shutdown(wait=True)`), immediate pending queue drainage (`cancel_pending=True`), and per-task cancellation (`cancel_task`). |
 
 ### Week 2 — Discovery and Workload Sharing (Completed)
 - [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
