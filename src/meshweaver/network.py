@@ -14,9 +14,11 @@ import uuid
 from meshweaver.exceptions import (
     ConnectionClosedError,
     HandshakeError,
+    InvalidPayloadError,
     MalformedMessageError,
     NetworkTimeoutError,
     PeerConnectionError,
+    ValidationError,
 )
 from meshweaver.peers import PeerRegistry
 from meshweaver.protocol import (
@@ -168,9 +170,14 @@ class PeerNode:
 
         # Task registry for local task execution
         from meshweaver.tasks import TaskRegistry
+        from meshweaver.execution import TaskExecutionEngine
 
         self.task_registry: TaskRegistry = (
             task_registry if task_registry is not None else TaskRegistry.create_default()
+        )
+        self.execution_engine: TaskExecutionEngine = TaskExecutionEngine(
+            registry=self.task_registry,
+            auto_start=True,
         )
         self._active_task_counter: int = 0
 
@@ -238,7 +245,23 @@ class PeerNode:
     @property
     def active_task_count(self) -> int:
         """Return the count of currently executing tasks on this node."""
-        return self._active_task_counter
+        engine_running = (
+            self.execution_engine.running_count
+            if hasattr(self, "execution_engine") and self.execution_engine is not None
+            else 0
+        )
+        return max(self._active_task_counter, engine_running)
+
+    def get_task(self, task_id: str) -> Any | None:
+        """Retrieve a locally tracked TaskRecord by ID."""
+        if hasattr(self, "execution_engine") and self.execution_engine is not None:
+            return self.execution_engine.get_task(task_id)
+        return None
+
+    def get_task_status(self, task_id: str) -> Any | None:
+        """Retrieve the TaskState of a locally tracked or executed task by ID."""
+        rec = self.get_task(task_id)
+        return rec.state if rec is not None else None
 
     def register_task(
         self,
@@ -303,7 +326,12 @@ class PeerNode:
 
             self._active_task_counter += 1
             try:
-                task_resp = await self.task_registry.execute(task_req)
+                task_resp = await self.execution_engine.execute_request(task_req)
+            except Exception as exec_exc:
+                task_resp = TaskResponse.error(
+                    task_id=task_req.task_id,
+                    error=TaskErrorInfo(code="EXECUTION_ERROR", message=str(exec_exc)),
+                )
             finally:
                 self._active_task_counter = max(0, self._active_task_counter - 1)
 
@@ -438,6 +466,17 @@ class PeerNode:
         if self.gossip_engine is not None and not self.gossip_engine.is_running:
             self.gossip_engine.start()
 
+        if hasattr(self, "execution_engine") and self.execution_engine is not None:
+            if self.execution_engine.is_shutting_down:
+                from meshweaver.execution import TaskExecutionEngine
+
+                self.execution_engine = TaskExecutionEngine(
+                    registry=self.task_registry,
+                    auto_start=True,
+                )
+            elif not self.execution_engine.is_running:
+                self.execution_engine.start()
+
     async def stop(self) -> None:
         """
         Gracefully stop the peer server, cancel background listeners, and close connections.
@@ -486,7 +525,12 @@ class PeerNode:
         for fut in list(self._pending_requests.values()):
             if not fut.done():
                 fut.set_exception(ConnectionClosedError("Peer node stopped"))
-        self._pending_requests.clear()
+        # Shut down execution engine
+        if hasattr(self, "execution_engine") and self.execution_engine is not None:
+            try:
+                await self.execution_engine.shutdown(wait=False, cancel_pending=True)
+            except Exception as exc:
+                logger.debug("Error shutting down execution engine: %s", exc)
 
         # Yield a brief slice so event loop flushes socket cleanup
         await asyncio.sleep(0.01)
@@ -591,14 +635,17 @@ class PeerNode:
                     msg = await conn.receive()
                 except ConnectionClosedError:
                     break
-                except MalformedMessageError as exc:
-                    logger.warning("Received malformed message from %s: %s", conn.peer_address, exc)
-                    err_msg = Message.create(
-                        MessageType.ERROR,
-                        sender_id=self.peer_id,
-                        payload={"code": "MALFORMED_MESSAGE", "message": str(exc)},
-                    )
-                    await conn.send(err_msg)
+                except (MalformedMessageError, InvalidPayloadError, ValidationError) as exc:
+                    logger.warning("Received malformed/invalid message from %s: %s", conn.peer_address, exc)
+                    try:
+                        err_msg = Message.create(
+                            MessageType.ERROR,
+                            sender_id=self.peer_id,
+                            payload={"code": "MALFORMED_MESSAGE", "message": str(exc)},
+                        )
+                        await conn.send(err_msg)
+                    except Exception:
+                        pass
                     continue
 
                 if msg is None:
@@ -724,8 +771,8 @@ class PeerNode:
         candidates: list[tuple[str, str, int]] = []
         if target_peer_id is not None:
             if target_peer_id == self.peer_id:
-                # Local execution
-                return await self.task_registry.execute(req)
+                # Local execution via execution engine
+                return await self.execution_engine.execute_request(req)
 
             rec = self.peer_registry.get(target_peer_id)
             if rec is not None:

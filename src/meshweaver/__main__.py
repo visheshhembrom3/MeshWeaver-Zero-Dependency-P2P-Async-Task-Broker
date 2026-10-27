@@ -60,6 +60,55 @@ async def run_status_cmd(
         await node.stop()
 
 
+async def run_start_cmd(
+    host: str = "127.0.0.1",
+    port: int = 0,
+    peer_id: str | None = None,
+    seeds: list[str] | None = None,
+    duration: float | None = None,
+    verbose: bool = False,
+    as_json: bool = False,
+) -> int:
+    """
+    Start a MeshWeaver node that runs persistently, listens for tasks, and gossips.
+    """
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+
+    setup_structured_logging(verbose=verbose, as_json=as_json)
+
+    assigned_id = peer_id if peer_id else f"node-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id)
+    node.enable_gossip()
+    await node.start()
+
+    print(f"[MeshWeaver] Node '{node.peer_id}' started on {node.host}:{node.bound_port}")
+    try:
+        if seeds:
+            print(f"[MeshWeaver] Joining mesh via seeds: {seeds}...")
+            await node.join_mesh(seeds, timeout=5.0)
+            print("[MeshWeaver] Successfully joined mesh via seeds.")
+
+        print(f"[MeshWeaver] Node '{node.peer_id}' is ready and accepting tasks. Press Ctrl+C to stop.")
+
+        if duration is not None and duration > 0:
+            await asyncio.sleep(duration)
+        else:
+            while True:
+                await asyncio.sleep(1.0)
+        return 0
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        return 0
+    finally:
+        print(f"\n[MeshWeaver] Stopping node '{node.peer_id}'...")
+        try:
+            await node.leave_mesh()
+        except Exception:
+            pass
+        await node.stop()
+        print(f"[MeshWeaver] Node '{node.peer_id}' stopped gracefully.")
+
+
 async def run_submit_cmd(
     task_name: str,
     args_list: list[str],
@@ -294,6 +343,19 @@ def main(argv: list[str] | None = None) -> int:
     submit_parser.add_argument("--timeout", type=float, default=5.0, help="Task timeout in seconds")
     submit_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
 
+    start_parser = subparsers.add_parser(
+        "start",
+        aliases=["node"],
+        help="Start a MeshWeaver peer node to serve tasks and participate in gossip",
+    )
+    start_parser.add_argument("--host", default="127.0.0.1", help="Local network host interface (default: 127.0.0.1)")
+    start_parser.add_argument("--port", type=int, default=0, help="Local network port to bind (default: 0 for dynamic)")
+    start_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local node/peer identifier")
+    start_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses (e.g. 127.0.0.1:8001)")
+    start_parser.add_argument("--duration", type=float, default=None, help="Optional duration in seconds to keep node running")
+    start_parser.add_argument("--json", action="store_true", help="Output status events in JSON format")
+    start_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+
     args = parser.parse_args(raw_args)
 
     # 1. Remote tasks demo mode
@@ -362,7 +424,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
-    # 5. Status command
+    # 5. Start node subcommand
+    if getattr(args, "command", None) in ("start", "node"):
+        seed_list = None
+        if args.seeds:
+            seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        return asyncio.run(
+            run_start_cmd(
+                host=args.host,
+                port=args.port,
+                peer_id=args.peer_id,
+                seeds=seed_list,
+                duration=getattr(args, "duration", None),
+                verbose=args.verbose,
+                as_json=args.json,
+            )
+        )
+
+    # 6. Status command
     if getattr(args, "command", None) == "status" or args.status:
         seed_list = None
         if args.seeds:

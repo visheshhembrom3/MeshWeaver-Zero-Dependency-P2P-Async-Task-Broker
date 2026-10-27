@@ -288,6 +288,109 @@ python -m meshweaver submit add 125 375 --seeds 127.0.0.1:8001
 python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
 ```
 
+### Multi-Node Cluster Startup and Remote Task Execution
+
+Start independent peer nodes and dispatch tasks across the mesh using either the CLI or the Python API:
+
+#### 1. Node Startup Commands
+
+**Start a Seed/Bootstrap Node:**
+```bash
+# Start a designated seed node listening on a fixed port:
+python -m meshweaver start --host 127.0.0.1 --port 8001 --peer-id seed-node
+```
+
+**Start Worker Nodes:**
+```bash
+# In separate terminal windows, start worker nodes connected to the seed node:
+python -m meshweaver start --host 127.0.0.1 --port 8002 --peer-id worker-node-1 --seeds 127.0.0.1:8001
+python -m meshweaver start --host 127.0.0.1 --port 8003 --peer-id worker-node-2 --seeds 127.0.0.1:8001
+```
+
+**Programmatic Startup in Python:**
+```python
+import asyncio
+from meshweaver import PeerNode
+
+async def main() -> None:
+    async with PeerNode(peer_id="worker-node-1", host="127.0.0.1", port=8002) as worker:
+        worker.enable_gossip()
+        await worker.join_mesh(["127.0.0.1:8001"])
+        print(f"Worker {worker.peer_id} active on port {worker.bound_port}")
+        # Keep serving until cancelled
+        while True:
+            await asyncio.sleep(1.0)
+
+asyncio.run(main())
+```
+
+#### 2. Task Submission Example
+
+**Submit via CLI:**
+```bash
+# Submit built-in example tasks to the mesh:
+python -m meshweaver submit add 15 27 --seeds 127.0.0.1:8001
+python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
+
+# Submit and output structured JSON:
+python -m meshweaver submit add 100 250 --seeds 127.0.0.1:8001 --json
+```
+
+**Submit via Python API:**
+```python
+import asyncio
+from meshweaver import PeerNode, TaskStatus
+
+async def main() -> None:
+    async with PeerNode(peer_id="client-node", host="127.0.0.1", port=0) as client:
+        client.enable_gossip()
+        await client.join_mesh(["127.0.0.1:8001"])
+
+        # Submit task with load-aware routing and automatic failover retry
+        response = await client.submit_task("add", 15, 27)
+        if response.status == TaskStatus.SUCCESS:
+            print(f"[SUCCESS] Task ID: {response.task_id} | Result: {response.result} (took {response.execution_time:.4f}s)")
+        else:
+            print(f"[ERROR] Task ID: {response.task_id} | Code: {response.error.code} | Message: {response.error.message}")
+
+asyncio.run(main())
+```
+
+#### 3. Expected Output
+
+**CLI Text Output (Success):**
+```text
+[MeshWeaver] Node 'cli-client-48201' started on 127.0.0.1:58432
+[MeshWeaver] Joining mesh via seeds: ['127.0.0.1:8001']...
+[SUCCESS] Task ID: task-66d4918e7e2343fa89b25d0c75c59325 | Result: 42
+[MeshWeaver] Node 'cli-client-48201' stopped gracefully.
+```
+
+**CLI JSON Output (Success):**
+```json
+{
+  "task_id": "task-66d4918e7e2343fa89b25d0c75c59325",
+  "status": "success",
+  "result": 42,
+  "error": null,
+  "execution_time": 0.0014,
+  "metadata": {}
+}
+```
+
+**Rejection Output (Unknown Task):**
+```text
+[FAILURE] Task ID: task-e2985f5e27a64117b4c6e00b21a716c5 | Code: UNKNOWN_TASK | Error: Task 'unknown_task' is not registered in this engine's TaskRegistry
+```
+
+#### 4. Current Limitations
+
+- **At-most-once execution semantics:** Remote tasks are dispatched asynchronously over TCP and executed by the selected worker peer. If the connection fails prior to transmission, the client scheduler attempts failover to secondary candidate peers. If a network disruption occurs mid-execution, duplicate execution is avoided and no two-phase commit or automatic distributed checkpointing is provided.
+- **Strict safety & no arbitrary remote code execution:** MeshWeaver only executes explicitly registered functions in a node's `TaskRegistry`. Deserialization of arbitrary Python code objects, unpickled data, and unsafe identifiers (`eval`, `exec`, `os`, `sys`, dunder methods) are rejected by design.
+- **Payload & frame size limits:** Individual task requests and responses are limited to 64 KB (`MAX_TASK_PAYLOAD_SIZE`), and binary framing enforces a 10 MB limit (`MAX_FRAME_SIZE`) to protect against memory exhaustion.
+- **JSON-serializable data only:** Task positional arguments (`args`), keyword arguments (`kwargs`), and return values must consist of JSON-serializable primitives (int, float, str, bool, list, dict, None).
+- **Gossip eventual consistency:** Load-aware routing selects the candidate peer with the lowest composite load score based on periodic gossip dissemination. Transient load fluctuations between gossip rounds can produce temporary routing skew until the next gossip synchronization cycle.
+
 ## Roadmap
 
 ### Week 1 — Networking Foundation (Completed)

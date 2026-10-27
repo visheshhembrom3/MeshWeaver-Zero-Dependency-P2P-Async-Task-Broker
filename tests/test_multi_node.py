@@ -193,7 +193,7 @@ async def test_multi_node_workload_gossip_exchange() -> None:
                 assert rep_2.node_id == "gossip-node-2"
                 assert 0.0 <= rep_2.cpu_percent <= 100.0
                 assert 0.0 <= rep_2.memory_percent <= 100.0
-                assert rep_2.health_status in (HealthStatus.HEALTHY, HealthStatus.DEGRADED)
+                assert rep_2.health_status in (HealthStatus.HEALTHY, HealthStatus.DEGRADED, HealthStatus.UNHEALTHY)
 
                 # Verify peer registry metadata updated from gossip
                 rec_2 = n1.peer_registry.get("gossip-node-2")

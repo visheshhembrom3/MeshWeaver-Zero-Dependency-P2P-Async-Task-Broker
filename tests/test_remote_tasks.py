@@ -23,6 +23,8 @@ import pytest
 from meshweaver import (
     HealthStatus,
     LoadAwareRoutingStrategy,
+    Message,
+    MessageType,
     NoAvailablePeerError,
     NodeResourceReport,
     PeerNode,
@@ -33,6 +35,7 @@ from meshweaver import (
     TaskResponse,
     TaskRouter,
     TaskRoutingError,
+    TaskState,
     TaskStatus,
 )
 
@@ -450,3 +453,239 @@ def test_remote_tasks_cli_script_execution() -> None:
     assert "Testing strict execution safety boundaries..." in stdout
     assert "Testing worker failover resilience..." in stdout
     assert "Remote Task Demonstration completed successfully!" in stdout
+
+
+@pytest.mark.asyncio
+async def test_invalid_message_handling_over_network() -> None:
+    """
+    Verify receiving peer handles invalid or malformed messages over TCP gracefully:
+    1. TASK_REQUEST missing required task_id and task_name fields.
+    2. TASK_REQUEST with corrupted payload parameters.
+    3. Malformed JSON frame on raw socket connection.
+    Worker does not crash and returns clear error responses.
+    """
+    async with PeerNode(peer_id="worker-invalid-test", host="127.0.0.1", port=0) as worker:
+        async with PeerNode(peer_id="client-invalid-test", host="127.0.0.1", port=0) as client:
+            conn = await client.connect_to_peer(worker.host, worker.bound_port, timeout=3.0)
+
+            # 1. Send TASK_REQUEST with dangerous forbidden task name (e.g. __import__)
+            bad_msg = Message(
+                message_id="bad-msg-1",
+                message_type=MessageType.TASK_REQUEST,
+                sender_id=client.peer_id,
+                timestamp=time.time(),
+                recipient_id=worker.peer_id,
+                payload={"task_id": "bad-id-1", "task_name": "__import__"},
+            )
+            resp_msg = await client.send_request(conn, bad_msg, timeout=3.0)
+            assert resp_msg.message_type == MessageType.TASK_RESPONSE
+            err_resp = TaskResponse.from_message(resp_msg)
+            assert err_resp.status in (TaskStatus.ERROR, TaskStatus.FAILURE)
+            assert err_resp.error is not None
+            assert err_resp.error.code == "INVALID_TASK_REQUEST"
+
+            # 2. Send TASK_REQUEST with dunder forbidden kwargs
+            bad_params_msg = Message(
+                message_id="bad-msg-2",
+                message_type=MessageType.TASK_REQUEST,
+                sender_id=client.peer_id,
+                timestamp=time.time(),
+                recipient_id=worker.peer_id,
+                payload={"task_id": "bad-id-123", "task_name": "add", "kwargs": {"__code__": "evil"}},
+            )
+            resp_params = await client.send_request(conn, bad_params_msg, timeout=3.0)
+            assert resp_params.message_type == MessageType.TASK_RESPONSE
+            err_params = TaskResponse.from_message(resp_params)
+            assert err_params.status in (TaskStatus.ERROR, TaskStatus.FAILURE)
+            assert err_params.error is not None
+            assert err_params.error.code == "INVALID_TASK_REQUEST"
+
+            # 3. Direct raw malformed frame handling
+            reader, writer = await asyncio.open_connection("127.0.0.1", worker.bound_port)
+            try:
+                # Send invalid framing header (length prefix claiming 10 bytes, followed by invalid JSON)
+                import struct
+                writer.write(struct.pack("!I", 8) + b"NOT_JSON")
+                await writer.drain()
+                # Server closes or resets connection cleanly without crashing
+                data = await reader.read(100)
+            except Exception:
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+            # Ensure worker is still healthy and responsive
+            resp_ping = await client.submit_task("ping", target_peer_id=worker.peer_id)
+            assert resp_ping.status == TaskStatus.SUCCESS
+            assert resp_ping.result == "pong"
+
+
+@pytest.mark.asyncio
+async def test_task_status_updates_and_lifecycle_tracking() -> None:
+    """
+    Verify task status transitions, execution duration tracking, and state inspection:
+    - Worker records task in execution engine upon submission.
+    - Transitions through TaskState.RUNNING to TaskState.COMPLETED.
+    - Worker provides get_task_status(task_id) -> TaskState.COMPLETED.
+    - Worker provides get_task(task_id) returning TaskRecord with duration and result.
+    - Active task count tracks during execution and resets upon completion.
+    - Failed tasks transition to TaskState.FAILED with recorded error code.
+    """
+    async with PeerNode(peer_id="worker-status-test", host="127.0.0.1", port=0) as worker:
+        async with PeerNode(peer_id="client-status-test", host="127.0.0.1", port=0) as client:
+            @worker.register_task("timed_task")
+            async def timed_task(duration_sec: float) -> str:
+                await asyncio.sleep(duration_sec)
+                return "completed_ok"
+
+            await client.connect_to_peer(worker.host, worker.bound_port, timeout=3.0)
+
+            # Pre-execution: task is untracked
+            task_id = "lifecycle-task-100"
+            assert worker.get_task(task_id) is None
+            assert worker.get_task_status(task_id) is None
+            assert worker.active_task_count == 0
+
+            # Submit task to worker
+            resp = await client.submit_task("timed_task", 0.05, task_id=task_id)
+            assert resp.status == TaskStatus.SUCCESS
+            assert resp.result == "completed_ok"
+            assert resp.execution_time is not None
+            assert resp.execution_time >= 0.04
+
+            # Post-execution: worker tracks task record and terminal state
+            rec = worker.get_task(task_id)
+            assert rec is not None
+            assert rec.task_id == task_id
+            assert rec.state == TaskState.COMPLETED
+            assert rec.is_completed is True
+            assert rec.result == "completed_ok"
+            assert rec.duration is not None
+            assert rec.duration >= 0.04
+            assert rec.started_at is not None
+            assert rec.completed_at is not None
+            assert rec.completed_at >= rec.started_at
+
+            # Query get_task_status
+            assert worker.get_task_status(task_id) == TaskState.COMPLETED
+            assert worker.active_task_count == 0
+
+            # Test failure lifecycle tracking
+            fail_id = "lifecycle-fail-200"
+            fail_resp = await client.submit_task("unregistered_cmd", task_id=fail_id)
+            assert fail_resp.status in (TaskStatus.ERROR, TaskStatus.FAILURE)
+
+            fail_rec = worker.get_task(fail_id)
+            assert fail_rec is not None
+            assert fail_rec.state == TaskState.FAILED
+            assert fail_rec.is_failed is True
+            assert fail_rec.error is not None
+            assert fail_rec.error.code == "UNKNOWN_TASK"
+            assert worker.get_task_status(fail_id) == TaskState.FAILED
+
+
+def test_cli_submit_command_execution() -> None:
+    """
+    Verify running python -m meshweaver submit command-line tool against a live peer.
+    """
+    import subprocess
+    import sys
+    import time
+
+    seed_proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "meshweaver", "start", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # Read stdout line to extract port
+        seed_port = None
+        for _ in range(30):
+            line = seed_proc.stdout.readline() if seed_proc.stdout else ""
+            if "started on" in line:
+                parts = line.strip().split(":")
+                seed_port = int(parts[-1])
+                break
+            time.sleep(0.1)
+
+        assert seed_port is not None, "Failed to start seed node process"
+        time.sleep(0.2)
+
+        # 1. Successful submission: add 40 60
+        proc_add = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "meshweaver",
+                "submit",
+                "add",
+                "40",
+                "60",
+                "--seeds",
+                f"127.0.0.1:{seed_port}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+        assert proc_add.returncode == 0, f"Submit failed:\n{proc_add.stderr}"
+        assert "[SUCCESS]" in proc_add.stdout
+        assert "100" in proc_add.stdout
+
+        # 2. Unknown task submission: rejected with non-zero exit code
+        proc_unk = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "meshweaver",
+                "submit",
+                "unknown_nonexistent_task",
+                "1",
+                "--seeds",
+                f"127.0.0.1:{seed_port}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+        assert proc_unk.returncode != 0
+        assert "UNKNOWN_TASK" in proc_unk.stdout
+    finally:
+        seed_proc.terminate()
+        try:
+            seed_proc.wait(timeout=3.0)
+        except Exception:
+            seed_proc.kill()
+
+
+def test_cli_start_command_execution() -> None:
+    """
+    Verify running python -m meshweaver start to boot a node for a short duration.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "meshweaver",
+            "start",
+            "--duration",
+            "0.3",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10.0,
+    )
+    assert proc.returncode == 0, f"Start failed:\n{proc.stderr}"
+    stdout = proc.stdout
+    assert "started on" in stdout
+    assert "ready and accepting tasks" in stdout
+    assert "stopped gracefully" in stdout
+

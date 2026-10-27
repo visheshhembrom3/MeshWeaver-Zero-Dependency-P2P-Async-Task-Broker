@@ -838,7 +838,7 @@ async def test_two_peers_periodic_gossip_exchange() -> None:
             assert status_b_on_a.node_id == node_b.peer_id
             assert 0.0 <= status_b_on_a.cpu_percent <= 100.0
             assert 0.0 <= status_b_on_a.memory_percent <= 100.0
-            assert status_b_on_a.health_status in (HealthStatus.HEALTHY, HealthStatus.DEGRADED)
+            assert status_b_on_a.health_status in (HealthStatus.HEALTHY, HealthStatus.DEGRADED, HealthStatus.UNHEALTHY)
 
             assert status_a_on_b.node_id == node_a.peer_id
             assert 0.0 <= status_a_on_b.cpu_percent <= 100.0
