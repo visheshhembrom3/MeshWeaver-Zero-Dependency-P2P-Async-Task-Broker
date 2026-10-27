@@ -43,7 +43,7 @@ MeshWeaver explores a peer-to-peer alternative for learning and experimentation,
                CLI / Web Dashboard
 ```
 
-The diagram is conceptual. The actual network topology and implementation will evolve as features are completed.
+The diagram is conceptual. The actual network topology and implementation will evolve as features are completed. For a comprehensive technical specification of subsystems, binary framing, Kademlia DHT, gossip engine, and load-aware routing mechanics, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Main Components
 
