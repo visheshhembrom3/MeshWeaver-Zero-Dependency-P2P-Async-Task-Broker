@@ -53,6 +53,7 @@ class TaskState(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
+    SUCCEEDED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
@@ -74,11 +75,13 @@ class TaskState(StrEnum):
             if self.value == val:
                 return True
             # Compatibility aliases with TaskStatus
-            if self == TaskState.COMPLETED and val in ("SUCCESS", "COMPLETED"):
+            if self == TaskState.COMPLETED and val in ("SUCCESS", "COMPLETED", "SUCCEEDED"):
                 return True
             if self == TaskState.FAILED and val in ("FAILURE", "ERROR", "FAILED"):
                 return True
             return False
+        if hasattr(other, "value") and isinstance(other.value, str):
+            return self.__eq__(other.value)
         return False
 
     def __hash__(self) -> int:
@@ -91,7 +94,7 @@ class TaskState(StrEnum):
             for member in cls:
                 if member.value == val_upper or member.name == val_upper:
                     return member
-            if val_upper == "SUCCESS":
+            if val_upper in ("SUCCESS", "SUCCEEDED"):
                 return cls.COMPLETED
             if val_upper in ("FAILURE", "ERROR"):
                 return cls.FAILED
@@ -172,6 +175,11 @@ class TaskRecord:
     def is_completed(self) -> bool:
         """Return True if task completed successfully."""
         return self.state == TaskState.COMPLETED
+
+    @property
+    def is_succeeded(self) -> bool:
+        """Return True if task completed successfully (alias for is_completed)."""
+        return self.is_completed
 
     @property
     def is_failed(self) -> bool:

@@ -179,6 +179,13 @@ class PeerNode:
             registry=self.task_registry,
             auto_start=True,
         )
+        from meshweaver.worker import TaskWorker
+
+        self.worker: TaskWorker = TaskWorker(
+            registry=self.task_registry,
+            concurrency=self.execution_engine.max_concurrency,
+            auto_start=True,
+        )
         self._active_task_counter: int = 0
 
         # Load-aware task router

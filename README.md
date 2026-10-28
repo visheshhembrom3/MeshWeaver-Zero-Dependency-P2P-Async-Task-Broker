@@ -175,6 +175,18 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+### Running the Asynchronous Task Worker Demonstration
+
+Demonstrate the standalone `TaskWorker` engine accepting validated `TaskEnvelope` envelopes, managing lifecycle states (`pending` -> `running` -> `succeeded` / `failed`), enforcing execution timeouts, isolating exceptions, strictly preventing arbitrary remote code execution, and managing concurrency limits:
+
+```bash
+# Run task worker execution demonstration:
+python examples/task_worker_execution.py
+
+# Run with custom worker concurrency limit:
+python examples/task_worker_execution.py --concurrency 4
+```
+
 ### Running the Two-Peer Demonstration
 
 Demonstrate two local MeshWeaver nodes binding dynamic ports, completing an asynchronous handshake, exchanging a ping/pong message, and executing validated task requests (`add`, `reverse_string`) with orderly shutdown:
@@ -465,8 +477,8 @@ The node status subsystem unifies discovery, registry membership, connection sta
 | **CLI Status Command** | `python -m meshweaver status` displays an ASCII table dashboard; `python -m meshweaver status --json` emits clean, parseable JSON; `--seeds` enables querying remote mesh status. |
 
 
-### Week 3 — Routing and Reliability
-- Add task submission and task lifecycle states.
+### Week 3 — Task Execution and Reliability
+- [x] **Asynchronous task worker execution engine (Milestone 1, Commit 11):** Implemented `TaskWorker`, `TaskEnvelope`, `TaskResult`, and `TaskLifecycleState` (`pending` -> `running` -> `succeeded`, `failed`, `cancelled`). Accepts validated task envelopes, validates task IDs and 64 KB payload limits. Executes supported tasks asynchronously where appropriate (async coroutines directly, synchronous handlers safely in worker threads). Adds per-task and default execution timeouts, structured exception handling, and configurable concurrency limits (`concurrency`). Strictly prevents arbitrary untrusted code execution (only registered tasks execute, rejecting `eval`, `exec`, `os`, `sys`, dynamic imports, code objects, and dunder keys). Includes comprehensive unit tests (`tests/test_worker.py`) and a working example (`examples/task_worker_execution.py`).
 - Route tasks based on available peer/load information.
 - Add heartbeat monitoring, timeouts, and failure handling.
 - Reassign eligible tasks after a peer becomes unavailable.

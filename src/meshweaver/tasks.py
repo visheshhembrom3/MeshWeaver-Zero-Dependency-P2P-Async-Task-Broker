@@ -291,9 +291,20 @@ class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
+    SUCCEEDED = "success"
     FAILURE = "failure"
     ERROR = "error"
     CANCELLED = "cancelled"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Any:
+        if isinstance(value, str):
+            val_lower = value.lower()
+            if val_lower in ("succeeded", "completed"):
+                return cls.SUCCESS
+            if val_lower == "failed":
+                return cls.FAILURE
+        return super()._missing_(value)
 
 
 @dataclass(frozen=True, slots=True)
