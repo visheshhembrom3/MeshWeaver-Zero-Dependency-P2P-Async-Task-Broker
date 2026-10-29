@@ -71,6 +71,18 @@ class NoAvailablePeerError(TaskRoutingError):
     """Raised when no suitable or reachable peer is available to execute a task."""
 
 
+class TaskSchedulingError(TaskRoutingError):
+    """Raised when an error occurs while scheduling a task to an eligible worker."""
+
+
+class NoEligibleWorkerError(NoAvailablePeerError, TaskSchedulingError):
+    """Raised when no worker meets eligibility criteria for task execution."""
+
+
+class IncompatibleWorkerError(TaskSchedulingError):
+    """Raised when a candidate worker does not support the requested task or requirements."""
+
+
 class TaskTimeoutError(NetworkTimeoutError, TaskError):
     """Raised when remote task execution exceeds configured timeout."""
 
@@ -113,6 +125,10 @@ class GossipError(MeshWeaverError):
 
 class StaleDataError(GossipError):
     """Raised when an incoming gossip record is rejected because it is stale."""
+
+
+class StaleResourceReportError(StaleDataError, TaskSchedulingError):
+    """Raised when a candidate worker's resource report is rejected due to staleness."""
 
 
 class InvalidReportError(ValidationError, GossipError):

@@ -10,8 +10,12 @@ import time
 from typing import TYPE_CHECKING, Any, Iterable
 
 from meshweaver.exceptions import (
+    IncompatibleWorkerError,
     NoAvailablePeerError,
+    NoEligibleWorkerError,
+    StaleResourceReportError,
     TaskRoutingError,
+    TaskSchedulingError,
 )
 from meshweaver.gossip import HealthStatus, NodeResourceReport
 from meshweaver.peers import PeerRecord, PeerState
@@ -164,9 +168,22 @@ class TaskRouter:
         self,
         peer_node: Any,
         strategy: LoadAwareRoutingStrategy | None = None,
+        *,
+        scheduler: Any | None = None,
     ) -> None:
         self.peer_node = peer_node
         self.strategy = strategy if strategy is not None else LoadAwareRoutingStrategy()
+        if scheduler is not None:
+            self._scheduler = scheduler
+        else:
+            from meshweaver.scheduler import TaskScheduler
+
+            self._scheduler = TaskScheduler(peer_node)
+
+    @property
+    def scheduler(self) -> Any:
+        """Return the underlying TaskScheduler instance."""
+        return self._scheduler
 
     def rank_candidates(
         self,
@@ -286,3 +303,29 @@ class TaskRouter:
             }
             for peer, score, tasks, cpu, mem, health in ranked
         ]
+
+
+# Re-exports from scheduler module for unified import convenience
+from meshweaver.scheduler import (
+    LoadAwareScheduler,
+    SchedulerConfig,
+    SchedulingDecision,
+    TaskScheduler,
+    WorkerEvaluation,
+)
+
+__all__: list[str] = [
+    "DEFAULT_ACTIVE_TASK_WEIGHT",
+    "DEFAULT_CPU_WEIGHT",
+    "DEFAULT_DEGRADED_PENALTY",
+    "DEFAULT_MEMORY_WEIGHT",
+    "DEFAULT_UNHEALTHY_PENALTY",
+    "LoadAwareRoutingStrategy",
+    "LoadAwareScheduler",
+    "RouteDecision",
+    "SchedulerConfig",
+    "SchedulingDecision",
+    "TaskRouter",
+    "TaskScheduler",
+    "WorkerEvaluation",
+]

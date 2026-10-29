@@ -118,20 +118,29 @@ The MeshWeaver node architecture integrates seven distinct functional layers:
   $$\text{PENDING} \longrightarrow \text{RUNNING} \longrightarrow \begin{cases} \text{COMPLETED} \\ \text{FAILED} \\ \text{CANCELLED} \end{cases}$$
 - **Safety Boundaries**: Only functions pre-registered via `@engine.register("name")` or `TaskRegistry.register("name", func)` can execute. Built-in sample tasks include `add` and `reverse_string`.
 
-### 3.6 Load-Aware Task Routing & Failover (`routing.py`)
+### 3.6 Load-Aware Task Scheduling & Routing (`scheduler.py`, `routing.py`)
 
-- **Task Routing Engine (`TaskRouter`)**: Connects discovery, gossip telemetry, and execution into an intelligent distributed dispatcher.
-- **Composite Load Scoring**: Evaluates candidate worker peers using weighted metrics:
-  $$\text{Score}(P) = w_{\text{tasks}} \cdot \text{Tasks} + w_{\text{cpu}} \cdot \text{CPU}\% + w_{\text{mem}} \cdot \text{RAM}\% + \text{Penalty}(\text{Health})$$
+- **Task Scheduler (`TaskScheduler` / `LoadAwareScheduler`)**: Central scheduling engine that selects an optimal, eligible worker peer across the mesh for incoming tasks.
+- **Documented Composite Load Scoring**: Evaluates candidate worker peers using a configurable multi-metric scoring function:
+  $$\text{Score}(w) = w_{\text{tasks}} \cdot \text{Tasks}(w) + w_{\text{cpu}} \cdot \text{CPU}\%(w) + w_{\text{mem}} \cdot \text{RAM}\%(w) + \text{Penalty}(\text{Health}(w))$$
   Default configuration:
-  - $w_{\text{tasks}} = 10.0$
-  - $w_{\text{cpu}} = 0.5$
-  - $w_{\text{mem}} = 0.5$
+  - $w_{\text{tasks}} = 10.0$ (direct queue and concurrency pressure)
+  - $w_{\text{cpu}} = 0.5$ (processor utilization percentage)
+  - $w_{\text{mem}} = 0.5$ (memory utilization percentage)
+  - $\text{Penalty}(\text{HEALTHY}) = 0.0$
   - $\text{Penalty}(\text{DEGRADED}) = +50.0$
-  - $\text{Penalty}(\text{UNHEALTHY}) = +1000.0$
-- **Deterministic Tie-Breaking**: When multiple peers report equal load scores, ties are broken deterministically by XOR distance:
-  $$d_{\text{tie}}(P) = \text{XOR}(NodeID(P), NodeID(\text{task\_id}))$$
-  This ensures balanced workload distribution without hotspotting.
+  - $\text{Penalty}(\text{UNKNOWN}) = +200.0$
+  - $\text{Penalty}(\text{UNHEALTHY}) = +1000.0$ (or complete disqualification)
+- **Worker Eligibility Filtering**:
+  1. *Stale Resource Report Rejection*: If a peer's resource report age exceeds `stale_report_threshold` (default: 30.0s), the report is rejected and the worker is disqualified.
+  2. *Failed Peer Avoidance*: Peers in `HealthStatus.UNHEALTHY` or marked as failed/unreachable in metadata or `PeerState.EXPIRED` in registry are excluded.
+  3. *Task Compatibility*: Enforces worker task support (`supported_tasks`), capability tags (`required_capabilities`), maximum concurrency limits (`max_concurrent_tasks`), and maintenance modes (`draining`, `accepting_tasks=False`).
+- **Deterministic Tie-Breaking**: When multiple eligible candidates produce identical composite scores:
+  1. Primary tie-breaker: Kademlia XOR distance between candidate's NodeID and task anchor NodeID:
+     $$d_{\text{tie}}(w) = \text{XOR}(NodeID(w), NodeID(\text{task\_id}))$$
+  2. Secondary tie-breaker: Lexicographical ordering on candidate's `peer_id`.
+  This guarantees reproducible, balanced distribution across tied workers without hotspotting.
+- **Decision & Observability Artifacts**: Produces structured `SchedulingDecision` and `WorkerEvaluation` records with full explainability (`scheduler.explain()` / `task_router.explain_routing()`).
 - **Automatic Failover Retry**: When dispatching via `PeerNode.submit_task()`, candidate workers are ranked in ascending order of score. If connection or task dispatch to the top candidate fails, the client automatically attempts execution on subsequent candidates.
 
 ### 3.7 Node Status & Observability API (`status.py`)

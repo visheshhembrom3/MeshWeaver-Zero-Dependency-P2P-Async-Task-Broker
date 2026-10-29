@@ -188,10 +188,13 @@ class PeerNode:
         )
         self._active_task_counter: int = 0
 
-        # Load-aware task router
+        # Load-aware task scheduler and router
+        from meshweaver.scheduler import TaskScheduler
         from meshweaver.routing import TaskRouter
 
-        self.task_router: TaskRouter = TaskRouter(self)
+        self.scheduler: TaskScheduler = TaskScheduler(self)
+        self.task_scheduler: TaskScheduler = self.scheduler
+        self.task_router: TaskRouter = TaskRouter(self, scheduler=self.scheduler)
 
         # Register default protocol handlers
         self._register_default_handlers()
