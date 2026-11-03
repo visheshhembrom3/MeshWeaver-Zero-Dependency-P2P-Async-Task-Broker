@@ -5,12 +5,15 @@ Demonstrates distributed peer-to-peer task execution across multiple MeshWeaver 
 1. Starts a local cluster with Bootstrap Seed, Compute Worker 1, Compute Worker 2, and a Client Node.
 2. Performs decentralized bootstrap discovery via seed nodes and neighbor exchange.
 3. Disseminates resource and workload reports across the mesh via gossip.
-4. Submits validated tasks (add, reverse_string, echo, ping) from the Client Node.
-5. TaskRouter dynamically selects the lowest-load reachable worker node using composite scoring.
-6. Executes tasks on workers within strict security boundaries (only registered tasks execute).
-7. Demonstrates safe rejection of an unregistered task name (UNKNOWN_TASK error).
-8. Demonstrates automatic failover: Worker 1 shuts down, tasks automatically route to Worker 2.
-9. Executes an orderly, graceful shutdown of all connections and nodes.
+4. Submits validated tasks (add, reverse_string, echo, ping) with TaskAck acknowledgements and correlation IDs.
+5. TaskScheduler / TaskRouter dynamically selects the lowest-load reachable worker node using composite scoring.
+6. Demonstrates duplicate-submission handling (idempotency: cached result returned without re-execution).
+7. Demonstrates asynchronous submission and real-time execution-status queries (TaskStatusReport).
+8. Demonstrates request timeout enforcement on slow tasks (TASK_TIMEOUT).
+9. Executes tasks on workers within strict security boundaries (only registered tasks execute).
+10. Demonstrates safe rejection of an unregistered task name (UNKNOWN_TASK error).
+11. Demonstrates automatic failover: Worker 1 shuts down, tasks automatically route to Worker 2.
+12. Executes an orderly, graceful shutdown of all connections and nodes.
 
 Usage:
     python examples/remote_tasks.py
@@ -39,9 +42,11 @@ from meshweaver import (  # noqa: E402
     HealthStatus,
     NodeResourceReport,
     PeerNode,
+    TaskAck,
     TaskRequest,
     TaskResponse,
     TaskStatus,
+    TaskStatusReport,
     setup_structured_logging,
 )
 
@@ -60,7 +65,7 @@ async def run_remote_tasks_demo(
 ) -> dict[str, Any]:
     """
     Run an end-to-end demonstration of remote task submission, load-aware routing,
-    execution boundaries, failover, and graceful shutdown.
+    acknowledgements, status queries, timeouts, idempotency, execution boundaries, failover, and shutdown.
 
     Args:
         host: Host IP to bind nodes to (default: '127.0.0.1').
@@ -96,6 +101,12 @@ async def run_remote_tasks_demo(
         for _ in range(n):
             a, b = b, a + b
         return a
+
+    # Register slow task on Worker 2 for timeout testing
+    @worker_2.register_task("slow_operation")
+    async def slow_op(sleep_sec: float) -> str:
+        await asyncio.sleep(sleep_sec)
+        return "slow_done"
 
     # Enable gossip on all nodes with fast intervals for demonstration
     for n in (seed, worker_1, worker_2, client):
@@ -145,11 +156,24 @@ async def run_remote_tasks_demo(
             )
         results["routing_candidates"] = explanations
 
-        # Phase 4: Submit supported example tasks
+        # Phase 4: Submit supported example tasks with TaskAck & Correlation IDs
         log_print("\n4. Submitting validated example tasks from Client Node...")
 
-        # Task 1: add
-        resp_add = await client.submit_task("add", 125, 375)
+        # Task 1: add with acknowledgement tracking & correlation ID
+        received_acks: list[TaskAck] = []
+        corr_id_add = "corr-demo-add-001"
+        resp_add = await client.submit_task(
+            "add",
+            125,
+            375,
+            correlation_id=corr_id_add,
+            on_ack=lambda ack: received_acks.append(ack),
+        )
+        ack_worker = received_acks[0].routed_to if received_acks else "N/A"
+        log_print(
+            f"   [Task: add(125, 375)] -> Ack: [Status: {received_acks[0].status if received_acks else 'N/A'}, "
+            f"Routed to: {ack_worker}, CorrID: {corr_id_add}]"
+        )
         log_print(
             f"   [Task: add(125, 375)] -> Result: {resp_add.result} "
             f"(Status: {resp_add.status.value}, ID: {resp_add.task_id[:16]}..., "
@@ -159,6 +183,9 @@ async def run_remote_tasks_demo(
             "status": resp_add.status.value,
             "result": resp_add.result,
         }
+        results["ack_received_ok"] = bool(
+            received_acks and received_acks[0].is_accepted and resp_add.status == TaskStatus.SUCCESS
+        )
 
         # Task 2: reverse_string
         resp_rev = await client.submit_task("reverse_string", "Zero-Dependency P2P")
@@ -193,8 +220,63 @@ async def run_remote_tasks_demo(
             "result": resp_fib.result,
         }
 
-        # Phase 5: Rejection of unregistered and invalid tasks
-        log_print("\n5. Testing strict execution safety boundaries...")
+        # Phase 5: Duplicate-submission handling (Idempotency)
+        log_print("\n5. Testing duplicate submission handling & idempotency cache...")
+        dedup_task_id = "demo-idempotent-task-1"
+        resp_first = await client.submit_task(
+            "fibonacci", 8, task_id=dedup_task_id, target_peer_id=worker_1.peer_id
+        )
+        resp_duplicate = await client.submit_task(
+            "fibonacci", 8, task_id=dedup_task_id, target_peer_id=worker_1.peer_id
+        )
+        log_print(
+            f"   First submission result: {resp_first.result} | "
+            f"Duplicate submission result: {resp_duplicate.result} "
+            f"(duplicate: {resp_duplicate.metadata.get('duplicate', False)})"
+        )
+        results["duplicate_idempotent_ok"] = bool(
+            resp_first.result == resp_duplicate.result == 21
+            and resp_duplicate.metadata.get("duplicate") is True
+        )
+
+        # Phase 6: Asynchronous task submission & real-time status queries
+        log_print("\n6. Testing asynchronous task submission and status queries...")
+        async_task_id = "demo-async-query-task"
+        ack_async = await client.submit_task_async(
+            "echo", "meshweaver-p2p", tag="async-status-test", task_id=async_task_id
+        )
+        log_print(f"   Async task submitted -> Ack: [Task: {ack_async.task_id}, Status: {ack_async.status}]")
+        status_rep = await client.query_task_status(async_task_id)
+        log_print(
+            f"   Queried status -> Task ID: {status_rep.task_id}, Status: {status_rep.status.value}, "
+            f"Worker: {status_rep.worker_peer_id}"
+        )
+        results["status_query_ok"] = bool(
+            status_rep.task_id == async_task_id
+            and status_rep.status in (TaskStatus.SUCCESS, TaskStatus.RUNNING, TaskStatus.PENDING)
+        )
+
+        # Phase 7: Request timeout enforcement
+        log_print("\n7. Testing request timeout enforcement on slow tasks...")
+        resp_timeout = await client.submit_task(
+            "slow_operation",
+            0.5,
+            target_peer_id=worker_2.peer_id,
+            timeout=0.05,
+            retry_on_failure=False,
+        )
+        log_print(
+            f"   Slow task timeout enforced -> Status: {resp_timeout.status.value}, "
+            f"Code: {resp_timeout.error.code if resp_timeout.error else 'None'}"
+        )
+        results["timeout_enforced_ok"] = bool(
+            resp_timeout.status in (TaskStatus.ERROR, TaskStatus.FAILURE)
+            and resp_timeout.error is not None
+            and resp_timeout.error.code == "TASK_TIMEOUT"
+        )
+
+        # Phase 8: Rejection of unregistered and invalid tasks
+        log_print("\n8. Testing strict execution safety boundaries...")
         resp_unreg = await client.submit_task("unregistered_remote_command", 1, 2)
         log_print(
             f"   Unregistered task safely rejected -> Status: {resp_unreg.status.value}, "
@@ -218,8 +300,8 @@ async def run_remote_tasks_demo(
             and resp_invalid.error.code == "INVALID_TASK_REQUEST"
         )
 
-        # Phase 6: Automatic failover testing
-        log_print("\n6. Testing worker failover resilience...")
+        # Phase 9: Automatic failover testing
+        log_print("\n9. Testing worker failover resilience...")
         # Gracefully stop Worker 1
         await worker_1.stop()
         log_print(f"   [Worker 1] {worker_1.peer_id} stopped (simulating worker crash/offline).")
@@ -234,8 +316,8 @@ async def run_remote_tasks_demo(
             resp_failover.status == TaskStatus.SUCCESS and resp_failover.result == 1000
         )
 
-        # Phase 7: Orderly teardown
-        log_print("\n7. Executing graceful teardown of remaining nodes...")
+        # Phase 10: Orderly teardown
+        log_print("\n10. Executing graceful teardown of remaining nodes...")
         await client.stop()
         await worker_2.stop()
         await seed.stop()

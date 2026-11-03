@@ -196,6 +196,12 @@ class PeerNode:
         self.task_scheduler: TaskScheduler = self.scheduler
         self.task_router: TaskRouter = TaskRouter(self, scheduler=self.scheduler)
 
+        # Deduplication and task state cache
+        from meshweaver.tasks import TaskDeduplicationStore
+
+        self._task_dedup: TaskDeduplicationStore = TaskDeduplicationStore()
+        self._pending_task_responses: dict[str, Any] = {}
+
         # Register default protocol handlers
         self._register_default_handlers()
 
@@ -304,22 +310,32 @@ class PeerNode:
             port_val = msg.payload.get("port")
             if port_val and isinstance(port_val, int) and not isinstance(port_val, bool):
                 remote_host = conn.peer_address[0]
-                rec = self.peer_registry.register(remote_node_id, remote_host, port_val)
+                peer_meta = dict(msg.payload.get("metadata", {}))
+                if "supported_tasks" in msg.payload:
+                    peer_meta["supported_tasks"] = msg.payload["supported_tasks"]
+                if "accepting_tasks" in msg.payload:
+                    peer_meta["accepting_tasks"] = msg.payload["accepting_tasks"]
+                rec = self.peer_registry.register(remote_node_id, remote_host, port_val, metadata=peer_meta)
                 try:
                     self.routing_table.add_contact(rec.to_contact())
                 except Exception:
                     pass
+            handshake_ack_payload = {
+                "node_id": self.peer_id,
+                "status": "accepted",
+                "supported_tasks": list(self.task_registry.list_tasks()),
+            }
             return Message.create(
                 MessageType.HANDSHAKE_ACK,
                 sender_id=self.peer_id,
                 recipient_id=remote_node_id,
                 correlation_id=msg.message_id,
-                payload={"node_id": self.peer_id, "status": "accepted"},
+                payload=handshake_ack_payload,
             )
 
         async def _handle_task_request(msg: Message, _conn: PeerConnection) -> Message:
             from meshweaver.exceptions import InvalidTaskError, ValidationError
-            from meshweaver.tasks import TaskErrorInfo, TaskRequest, TaskResponse
+            from meshweaver.tasks import TaskAck, TaskErrorInfo, TaskRequest, TaskResponse, TaskStatus
 
             try:
                 task_req = TaskRequest.from_message(msg)
@@ -327,6 +343,7 @@ class PeerNode:
                 err_resp = TaskResponse.error(
                     task_id=str(msg.payload.get("task_id", uuid.uuid4().hex)),
                     error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(parse_exc)),
+                    correlation_id=msg.correlation_id or msg.message_id,
                 )
                 return err_resp.to_message(
                     sender_id=self.peer_id,
@@ -334,18 +351,183 @@ class PeerNode:
                     correlation_id=msg.message_id,
                 )
 
+            corr_id = msg.correlation_id or task_req.correlation_id or msg.message_id
+
+            # 1. Deduplication check
+            if self._task_dedup.is_duplicate(task_req.task_id):
+                cached_resp = self._task_dedup.get_result(task_req.task_id)
+                if cached_resp is not None:
+                    logger.debug("Duplicate task %s already completed, returning cached response", task_req.task_id)
+                    dup_resp = TaskResponse(
+                        task_id=cached_resp.task_id,
+                        status=cached_resp.status,
+                        result=cached_resp.result,
+                        error=cached_resp.error,
+                        execution_time=cached_resp.execution_time,
+                        metadata={**cached_resp.metadata, "duplicate": True},
+                        correlation_id=corr_id,
+                    )
+                    return dup_resp.to_message(
+                        sender_id=self.peer_id,
+                        recipient_id=msg.sender_id,
+                        correlation_id=msg.message_id,
+                    )
+
+            # 2. Check intermediary routing/relay request
+            if task_req.metadata.get("relay") or task_req.metadata.get("route_through") == self.peer_id:
+                if not self.task_registry.has_task(task_req.task_name) and self.peer_registry.peer_count > 0:
+                    try:
+                        # Forward/route to eligible worker in mesh
+                        fwd_resp = await self.submit_task(task_req, correlation_id=corr_id, retry_on_failure=True)
+                        if isinstance(fwd_resp, TaskResponse):
+                            self._task_dedup.record_result(task_req.task_id, fwd_resp)
+                            return fwd_resp.to_message(
+                                sender_id=self.peer_id,
+                                recipient_id=msg.sender_id,
+                                correlation_id=msg.message_id,
+                            )
+                    except Exception as fwd_exc:
+                        logger.warning("Failed to relay task %s: %s", task_req.task_id, fwd_exc)
+
+            # 3. Register submission
+            ack = TaskAck(
+                task_id=task_req.task_id,
+                correlation_id=corr_id,
+                status="accepted",
+                routed_to=self.peer_id,
+                metadata={"worker": self.peer_id},
+            )
+            self._task_dedup.register_submission(task_req.task_id, corr_id, routed_to=self.peer_id, ack=ack)
+
+            # 4. Send immediate ACK if requested
+            if msg.payload.get("require_ack") or task_req.metadata.get("require_ack"):
+                try:
+                    ack_msg = ack.to_message(
+                        sender_id=self.peer_id,
+                        recipient_id=msg.sender_id,
+                        correlation_id=msg.message_id,
+                    )
+                    await _conn.send(ack_msg)
+                except Exception:
+                    pass
+
+            # 5. Local worker execution
             self._active_task_counter += 1
+            self._task_dedup.set_status(task_req.task_id, TaskStatus.RUNNING)
             try:
                 task_resp = await self.execution_engine.execute_request(task_req)
             except Exception as exec_exc:
                 task_resp = TaskResponse.error(
                     task_id=task_req.task_id,
                     error=TaskErrorInfo(code="EXECUTION_ERROR", message=str(exec_exc)),
+                    correlation_id=corr_id,
                 )
             finally:
                 self._active_task_counter = max(0, self._active_task_counter - 1)
 
+            task_resp.correlation_id = corr_id
+            task_resp.metadata["ack"] = ack.to_dict()
+            self._task_dedup.record_result(task_req.task_id, task_resp)
+
             return task_resp.to_message(
+                sender_id=self.peer_id,
+                recipient_id=msg.sender_id,
+                correlation_id=msg.message_id,
+            )
+
+        async def _handle_task_status_request(msg: Message, _conn: PeerConnection) -> Message:
+            from meshweaver.tasks import TaskErrorInfo, TaskStatus, TaskStatusReport
+
+            task_id = str(msg.payload.get("task_id", ""))
+            corr_id = msg.correlation_id or msg.message_id
+
+            # 1. Local execution engine / worker
+            rec = self.get_task(task_id)
+            if rec is not None:
+                st = rec.state if hasattr(rec, "state") else getattr(rec, "status", TaskStatus.PENDING)
+                try:
+                    status_enum = TaskStatus(st)
+                except (ValueError, TypeError):
+                    try:
+                        status_enum = TaskStatus(str(st).lower())
+                    except (ValueError, TypeError):
+                        status_enum = TaskStatus.PENDING
+                err = getattr(rec, "error", None)
+                if isinstance(err, str):
+                    err = TaskErrorInfo(code="ERROR", message=err)
+
+                report = TaskStatusReport(
+                    task_id=task_id,
+                    status=status_enum,
+                    correlation_id=corr_id,
+                    worker_peer_id=self.peer_id,
+                    created_at=getattr(rec, "created_at", None),
+                    started_at=getattr(rec, "started_at", None),
+                    completed_at=getattr(rec, "completed_at", None),
+                    execution_time=getattr(rec, "duration", None),
+                    result=getattr(rec, "result", None),
+                    error=err,
+                    metadata={"worker": self.peer_id},
+                )
+                return report.to_message(
+                    sender_id=self.peer_id,
+                    recipient_id=msg.sender_id,
+                    correlation_id=msg.message_id,
+                )
+
+            # 2. Deduplication store
+            dedup = self._task_dedup.get_record(task_id)
+            if dedup is not None:
+                routed_to = dedup.get("routed_to")
+                if routed_to and routed_to != self.peer_id:
+                    try:
+                        remote_rep = await self.query_task_status(task_id, target_peer_id=routed_to, timeout=2.0)
+                        return remote_rep.to_message(
+                            sender_id=self.peer_id,
+                            recipient_id=msg.sender_id,
+                            correlation_id=msg.message_id,
+                        )
+                    except Exception:
+                        pass
+
+                resp = dedup.get("response")
+                if resp is not None:
+                    report = TaskStatusReport(
+                        task_id=task_id,
+                        status=resp.status,
+                        correlation_id=corr_id,
+                        worker_peer_id=dedup.get("routed_to") or self.peer_id,
+                        execution_time=resp.execution_time,
+                        result=resp.result,
+                        error=resp.error,
+                        metadata=resp.metadata,
+                    )
+                    return report.to_message(
+                        sender_id=self.peer_id,
+                        recipient_id=msg.sender_id,
+                        correlation_id=msg.message_id,
+                    )
+                report = TaskStatusReport(
+                    task_id=task_id,
+                    status=dedup.get("status", TaskStatus.RUNNING if dedup.get("future") else TaskStatus.PENDING),
+                    correlation_id=corr_id,
+                    worker_peer_id=dedup.get("routed_to") or self.peer_id,
+                )
+                return report.to_message(
+                    sender_id=self.peer_id,
+                    recipient_id=msg.sender_id,
+                    correlation_id=msg.message_id,
+                )
+
+            # 3. Not found
+            report = TaskStatusReport(
+                task_id=task_id,
+                status=TaskStatus.ERROR,
+                correlation_id=corr_id,
+                worker_peer_id=self.peer_id,
+                error=TaskErrorInfo(code="TASK_NOT_FOUND", message=f"Task '{task_id}' not found on node {self.peer_id}"),
+            )
+            return report.to_message(
                 sender_id=self.peer_id,
                 recipient_id=msg.sender_id,
                 correlation_id=msg.message_id,
@@ -409,6 +591,7 @@ class PeerNode:
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
         self.register_handler(MessageType.TASK_REQUEST, _handle_task_request)
+        self.register_handler(MessageType.TASK_STATUS_REQUEST, _handle_task_status_request)
         self.register_handler(MessageType.FIND_NODE, _handle_find_node)
         self.register_handler(MessageType.GOSSIP, _handle_gossip)
         self.register_handler(MessageType.LOAD_REPORT, _handle_load_report)
@@ -604,10 +787,15 @@ class PeerNode:
 
         if do_handshake:
             try:
+                handshake_payload = {
+                    "node_id": self.peer_id,
+                    "port": self.bound_port,
+                    "supported_tasks": list(self.task_registry.list_tasks()),
+                }
                 handshake_msg = Message.create(
                     MessageType.HANDSHAKE,
                     sender_id=self.peer_id,
-                    payload={"node_id": self.peer_id, "port": self.bound_port},
+                    payload=handshake_payload,
                 )
                 await conn.send(handshake_msg)
                 resp = await conn.receive(timeout=timeout)
@@ -618,7 +806,12 @@ class PeerNode:
                 remote_node_id = str(resp.payload.get("node_id", resp.sender_id))
                 conn.remote_peer_id = remote_node_id
                 self._peer_connections[remote_node_id] = conn
-                rec = self.peer_registry.register(remote_node_id, host, port)
+                peer_meta = dict(resp.payload.get("metadata", {}))
+                if "supported_tasks" in resp.payload:
+                    peer_meta["supported_tasks"] = resp.payload["supported_tasks"]
+                if "accepting_tasks" in resp.payload:
+                    peer_meta["accepting_tasks"] = resp.payload["accepting_tasks"]
+                rec = self.peer_registry.register(remote_node_id, host, port, metadata=peer_meta)
                 try:
                     self.routing_table.add_contact(rec.to_contact())
                 except Exception:
@@ -671,20 +864,29 @@ class PeerNode:
                 # Normal message dispatch to registered handler
                 handler = self._handlers.get(msg.message_type)
                 if handler is not None:
-                    try:
-                        reply = await handler(msg, conn)
-                        if reply is not None:
-                            await conn.send(reply)
-                    except Exception as handler_exc:
-                        logger.exception("Error executing handler for %s", msg.message_type)
-                        err_reply = Message.create(
-                            MessageType.ERROR,
-                            sender_id=self.peer_id,
-                            recipient_id=msg.sender_id,
-                            correlation_id=msg.message_id,
-                            payload={"code": "HANDLER_ERROR", "message": str(handler_exc)},
-                        )
-                        await conn.send(err_reply)
+                    async def _dispatch_handler(h: MessageHandler, m: Message, c: PeerConnection) -> None:
+                        try:
+                            reply = await h(m, c)
+                            if reply is not None and not c.is_closed:
+                                await c.send(reply)
+                        except Exception as handler_exc:
+                            logger.exception("Error executing handler for %s", m.message_type)
+                            try:
+                                if not c.is_closed:
+                                    err_reply = Message.create(
+                                        MessageType.ERROR,
+                                        sender_id=self.peer_id,
+                                        recipient_id=m.sender_id,
+                                        correlation_id=m.message_id,
+                                        payload={"code": "HANDLER_ERROR", "message": str(handler_exc)},
+                                    )
+                                    await c.send(err_reply)
+                            except Exception:
+                                pass
+
+                    handler_task = asyncio.create_task(_dispatch_handler(handler, msg, conn))
+                    self._listener_tasks.add(handler_task)
+                    handler_task.add_done_callback(self._listener_tasks.discard)
                 else:
                     logger.debug("No handler for message type %s", msg.message_type)
 
@@ -727,6 +929,26 @@ class PeerNode:
         """Send a one-way message over an existing connection without awaiting reply."""
         await connection.send(message)
 
+    async def _execute_local_task(self, req: Any, corr_id: str | None = None) -> Any:
+        """Execute a validated TaskRequest locally using the execution engine."""
+        from meshweaver.tasks import TaskErrorInfo, TaskResponse, TaskStatus
+
+        self._active_task_counter += 1
+        self._task_dedup.set_status(req.task_id, TaskStatus.RUNNING)
+        try:
+            task_resp = await self.execution_engine.execute_request(req)
+        except Exception as exec_exc:
+            task_resp = TaskResponse.error(
+                task_id=req.task_id,
+                error=TaskErrorInfo(code="EXECUTION_ERROR", message=str(exec_exc)),
+            )
+        finally:
+            self._active_task_counter = max(0, self._active_task_counter - 1)
+
+        task_resp.correlation_id = corr_id or req.correlation_id or req.task_id
+        self._task_dedup.record_result(req.task_id, task_resp)
+        return task_resp
+
     async def submit_task(
         self,
         task_name_or_request: str | Any,
@@ -734,9 +956,12 @@ class PeerNode:
         target_peer_id: str | None = None,
         timeout: float = 5.0,
         task_id: str | None = None,
+        correlation_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         retry_on_failure: bool = True,
         max_candidates: int = 3,
+        wait: bool = True,
+        on_ack: Any | None = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -752,11 +977,18 @@ class PeerNode:
             NetworkTimeoutError,
             ValidationError,
         )
-        from meshweaver.tasks import TaskErrorInfo, TaskRequest, TaskResponse
+        from meshweaver.tasks import TaskAck, TaskErrorInfo, TaskRequest, TaskResponse, TaskStatus
+
+        corr_id = correlation_id or uuid.uuid4().hex
 
         # 1. Parse or create validated TaskRequest
         if isinstance(task_name_or_request, TaskRequest):
             req = task_name_or_request
+            if not req.correlation_id:
+                try:
+                    object.__setattr__(req, "correlation_id", corr_id)
+                except Exception:
+                    pass
         else:
             try:
                 req = TaskRequest.create(
@@ -765,24 +997,83 @@ class PeerNode:
                     kwargs=kwargs if kwargs else None,
                     task_id=task_id,
                     metadata=metadata,
+                    correlation_id=corr_id,
                 )
             except (InvalidTaskError, ValidationError) as exc:
                 return TaskResponse.error(
                     task_id=task_id if task_id else uuid.uuid4().hex,
                     error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(exc)),
+                    correlation_id=corr_id,
                 )
             except Exception as exc:
                 return TaskResponse.error(
                     task_id=task_id if task_id else uuid.uuid4().hex,
                     error=TaskErrorInfo(code="INVALID_TASK_REQUEST", message=str(exc)),
+                    correlation_id=corr_id,
                 )
 
-        # 2. Identify candidate peers
+        # 2. Check duplicate submission
+        if self._task_dedup.is_duplicate(req.task_id):
+            if wait:
+                cached = self._task_dedup.get_result(req.task_id)
+                if cached is not None:
+                    dup_resp = TaskResponse(
+                        task_id=cached.task_id,
+                        status=cached.status,
+                        result=cached.result,
+                        error=cached.error,
+                        execution_time=cached.execution_time,
+                        metadata={**cached.metadata, "duplicate": True},
+                        correlation_id=corr_id,
+                    )
+                    return dup_resp
+                fut = self._task_dedup.get_future(req.task_id)
+                if fut is not None:
+                    try:
+                        return await asyncio.wait_for(fut, timeout=timeout)
+                    except TimeoutError:
+                        return TaskResponse.error(
+                            task_id=req.task_id,
+                            error=TaskErrorInfo(
+                                code="TASK_TIMEOUT",
+                                message=f"Duplicate submission for task {req.task_id} timed out awaiting existing execution",
+                            ),
+                            correlation_id=corr_id,
+                        )
+            else:
+                cached_rec = self._task_dedup.get_record(req.task_id)
+                return TaskAck(
+                    task_id=req.task_id,
+                    correlation_id=corr_id,
+                    status="duplicate",
+                    routed_to=cached_rec.get("routed_to") if cached_rec else None,
+                    metadata={"duplicate": True, "already_submitted": True},
+                )
+
+        # 3. Identify candidate peers
         candidates: list[tuple[str, str, int]] = []
         if target_peer_id is not None:
             if target_peer_id == self.peer_id:
                 # Local execution via execution engine
-                return await self.execution_engine.execute_request(req)
+                ack = TaskAck(
+                    task_id=req.task_id,
+                    correlation_id=corr_id,
+                    status="accepted",
+                    routed_to=self.peer_id,
+                    metadata={"worker": self.peer_id, "local": True},
+                )
+                self._task_dedup.register_submission(req.task_id, corr_id, routed_to=self.peer_id, ack=ack)
+                if on_ack is not None:
+                    try:
+                        on_ack(ack)
+                    except Exception:
+                        pass
+                if not wait:
+                    asyncio.create_task(self._execute_local_task(req, corr_id))
+                    return ack
+                resp = await self._execute_local_task(req, corr_id)
+                resp.metadata["ack"] = ack.to_dict()
+                return resp
 
             rec = self.peer_registry.get(target_peer_id)
             if rec is not None:
@@ -799,14 +1090,28 @@ class PeerNode:
                             code="PEER_UNAVAILABLE",
                             message=f"Target peer '{target_peer_id}' is not found or reachable in mesh",
                         ),
+                        correlation_id=corr_id,
                     )
         else:
-            # Select candidate peers via task_router
-            candidate_records = self.task_router.select_candidates(
-                req,
-                count=max_candidates,
-                exclude=[self.peer_id],
-            )
+            # Select candidate peers via scheduler (with router fallback)
+            candidate_records = []
+            if hasattr(self, "task_scheduler") and self.task_scheduler is not None:
+                try:
+                    candidate_records = self.task_scheduler.select_candidate_workers(
+                        req,
+                        count=max_candidates,
+                        exclude=[self.peer_id],
+                    )
+                except Exception:
+                    pass
+
+            if not candidate_records:
+                candidate_records = self.task_router.select_candidates(
+                    req,
+                    count=max_candidates,
+                    exclude=[self.peer_id],
+                )
+
             if not candidate_records:
                 return TaskResponse.error(
                     task_id=req.task_id,
@@ -814,10 +1119,11 @@ class PeerNode:
                         code="NO_PEERS_AVAILABLE",
                         message="No available or reachable worker peers found in mesh to route task",
                     ),
+                    correlation_id=corr_id,
                 )
             candidates = [(c.peer_id, c.host, c.port) for c in candidate_records]
 
-        # 3. Dispatch task to candidate peer (with failover)
+        # 4. Dispatch task to candidate peer (with failover)
         last_error: TaskErrorInfo | None = None
         for candidate_id, host, port in candidates:
             conn = self._peer_connections.get(candidate_id)
@@ -841,7 +1147,28 @@ class PeerNode:
                         continue
                     break
 
-            msg = req.to_message(sender_id=self.peer_id, recipient_id=candidate_id)
+            # Create acknowledgement
+            ack = TaskAck(
+                task_id=req.task_id,
+                correlation_id=corr_id,
+                status="accepted",
+                routed_to=candidate_id,
+                metadata={"worker": candidate_id, "host": host, "port": port},
+            )
+            self._task_dedup.register_submission(req.task_id, corr_id, routed_to=candidate_id, ack=ack)
+            if on_ack is not None:
+                try:
+                    on_ack(ack)
+                except Exception:
+                    pass
+
+            if not wait:
+                # Asynchronous fire-and-forget submission
+                msg = req.to_message(sender_id=self.peer_id, recipient_id=candidate_id, correlation_id=corr_id)
+                await self.send_message(conn, msg)
+                return ack
+
+            msg = req.to_message(sender_id=self.peer_id, recipient_id=candidate_id, correlation_id=corr_id)
             try:
                 resp_msg = await self.send_request(conn, msg, timeout=timeout)
             except NetworkTimeoutError as timeout_exc:
@@ -865,7 +1192,11 @@ class PeerNode:
 
             if resp_msg.message_type == MessageType.TASK_RESPONSE:
                 try:
-                    return TaskResponse.from_message(resp_msg)
+                    resp = TaskResponse.from_message(resp_msg)
+                    resp.correlation_id = corr_id
+                    resp.metadata["ack"] = ack.to_dict()
+                    self._task_dedup.record_result(req.task_id, resp)
+                    return resp
                 except Exception as parse_exc:
                     return TaskResponse.error(
                         task_id=req.task_id,
@@ -873,15 +1204,19 @@ class PeerNode:
                             code="INVALID_RESPONSE",
                             message=f"Malformed task response from {candidate_id}: {parse_exc}",
                         ),
+                        correlation_id=corr_id,
                     )
             elif resp_msg.message_type == MessageType.ERROR:
-                return TaskResponse.error(
+                err_resp = TaskResponse.error(
                     task_id=req.task_id,
                     error=TaskErrorInfo(
                         code=str(resp_msg.payload.get("code", "REMOTE_ERROR")),
                         message=str(resp_msg.payload.get("message", "Remote peer returned an error")),
                     ),
+                    correlation_id=corr_id,
                 )
+                self._task_dedup.record_result(req.task_id, err_resp)
+                return err_resp
             else:
                 return TaskResponse.error(
                     task_id=req.task_id,
@@ -889,14 +1224,194 @@ class PeerNode:
                         code="UNEXPECTED_MESSAGE_TYPE",
                         message=f"Received unexpected message type {resp_msg.message_type} from {candidate_id}",
                     ),
+                    correlation_id=corr_id,
                 )
 
-        return TaskResponse.error(
+        final_err_resp = TaskResponse.error(
             task_id=req.task_id,
             error=last_error if last_error else TaskErrorInfo(
                 code="ROUTING_FAILED",
                 message="Failed to route task to any candidate peer",
             ),
+            correlation_id=corr_id,
+        )
+        self._task_dedup.record_result(req.task_id, final_err_resp)
+        return final_err_resp
+
+    async def submit_task_async(
+        self,
+        task_name_or_request: str | Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Submit a task asynchronously and return TaskAck immediately upon acknowledgement.
+        """
+        from meshweaver.tasks import TaskAck
+
+        kwargs["wait"] = False
+        res = await self.submit_task(task_name_or_request, *args, **kwargs)
+        if isinstance(res, TaskAck):
+            return res
+        if hasattr(res, "ack") and res.ack is not None:
+            if isinstance(res.ack, TaskAck):
+                return res.ack
+            if isinstance(res.ack, dict):
+                return TaskAck.from_dict(res.ack)
+        return TaskAck(
+            task_id=getattr(res, "task_id", uuid.uuid4().hex),
+            correlation_id=getattr(res, "correlation_id", uuid.uuid4().hex),
+            status="accepted",
+        )
+
+    async def query_task_status(
+        self,
+        task_id: str,
+        target_peer_id: str | None = None,
+        timeout: float = 3.0,
+    ) -> Any:
+        """
+        Query real-time execution status of a task across the mesh.
+
+        Checks the local node if target_peer_id is None or matches self.peer_id.
+        If the task was routed to another peer, queries that peer over TCP.
+        """
+        from meshweaver.tasks import TaskErrorInfo, TaskStatus, TaskStatusReport
+
+        corr_id = uuid.uuid4().hex
+
+        # 1. Target is self or not specified: check locally
+        if target_peer_id is None or target_peer_id == self.peer_id:
+            # Check local task record
+            rec = self.get_task(task_id)
+            if rec is not None:
+                st = rec.state if hasattr(rec, "state") else getattr(rec, "status", TaskStatus.PENDING)
+                try:
+                    status_enum = TaskStatus(st)
+                except (ValueError, TypeError):
+                    try:
+                        status_enum = TaskStatus(str(st).lower())
+                    except (ValueError, TypeError):
+                        status_enum = TaskStatus.PENDING
+                err = getattr(rec, "error", None)
+                if isinstance(err, str):
+                    err = TaskErrorInfo(code="ERROR", message=err)
+
+                return TaskStatusReport(
+                    task_id=task_id,
+                    status=status_enum,
+                    correlation_id=corr_id,
+                    worker_peer_id=self.peer_id,
+                    created_at=getattr(rec, "created_at", None),
+                    started_at=getattr(rec, "started_at", None),
+                    completed_at=getattr(rec, "completed_at", None),
+                    execution_time=getattr(rec, "duration", None),
+                    result=getattr(rec, "result", None),
+                    error=err,
+                    metadata={"worker": self.peer_id},
+                )
+
+            # Check deduplication store
+            dedup = self._task_dedup.get_record(task_id)
+            if dedup is not None:
+                routed_to = dedup.get("routed_to")
+                if routed_to and routed_to != self.peer_id:
+                    # Target is the routed peer
+                    target_peer_id = routed_to
+                else:
+                    resp = dedup.get("response")
+                    if resp is not None:
+                        return TaskStatusReport(
+                            task_id=task_id,
+                            status=resp.status,
+                            correlation_id=corr_id,
+                            worker_peer_id=self.peer_id,
+                            execution_time=resp.execution_time,
+                            result=resp.result,
+                            error=resp.error,
+                            metadata=resp.metadata,
+                        )
+                    return TaskStatusReport(
+                        task_id=task_id,
+                        status=TaskStatus.RUNNING if dedup.get("future") else TaskStatus.PENDING,
+                        correlation_id=corr_id,
+                        worker_peer_id=self.peer_id,
+                    )
+
+        # 2. Remote target query
+        if target_peer_id is not None and target_peer_id != self.peer_id:
+            conn = self._peer_connections.get(target_peer_id)
+            if conn is None or conn.is_closed:
+                rec = self.peer_registry.get(target_peer_id)
+                if rec is not None:
+                    conn = await self.connect_to_peer(rec.host, rec.port, timeout=timeout)
+                else:
+                    return TaskStatusReport(
+                        task_id=task_id,
+                        status=TaskStatus.ERROR,
+                        correlation_id=corr_id,
+                        worker_peer_id=target_peer_id,
+                        error=TaskErrorInfo(code="PEER_UNREACHABLE", message=f"Peer '{target_peer_id}' not found in registry"),
+                    )
+
+            msg = Message.create(
+                MessageType.TASK_STATUS_REQUEST,
+                sender_id=self.peer_id,
+                recipient_id=target_peer_id,
+                correlation_id=corr_id,
+                payload={"task_id": task_id, "correlation_id": corr_id},
+            )
+            try:
+                resp_msg = await self.send_request(conn, msg, timeout=timeout)
+                if resp_msg.message_type == MessageType.TASK_STATUS_RESPONSE:
+                    return TaskStatusReport.from_message(resp_msg)
+            except Exception as exc:
+                return TaskStatusReport(
+                    task_id=task_id,
+                    status=TaskStatus.ERROR,
+                    correlation_id=corr_id,
+                    worker_peer_id=target_peer_id,
+                    error=TaskErrorInfo(code="STATUS_QUERY_ERROR", message=f"Failed to query status from {target_peer_id}: {exc}"),
+                )
+
+        # 3. Not found
+        return TaskStatusReport(
+            task_id=task_id,
+            status=TaskStatus.ERROR,
+            correlation_id=corr_id,
+            error=TaskErrorInfo(code="TASK_NOT_FOUND", message=f"Task '{task_id}' not found"),
+        )
+
+    async def wait_for_task(
+        self,
+        task_id: str,
+        target_peer_id: str | None = None,
+        timeout: float = 10.0,
+        poll_interval: float = 0.05,
+    ) -> Any:
+        """
+        Wait for a previously submitted task to reach terminal state, returning TaskResponse.
+        """
+        from meshweaver.tasks import TaskErrorInfo, TaskResponse
+
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            report = await self.query_task_status(task_id, target_peer_id=target_peer_id, timeout=min(3.0, timeout))
+            if report.is_done:
+                return TaskResponse(
+                    task_id=task_id,
+                    status=report.status,
+                    result=report.result,
+                    error=report.error,
+                    execution_time=report.execution_time,
+                    metadata=report.metadata,
+                    correlation_id=report.correlation_id,
+                )
+            await asyncio.sleep(poll_interval)
+
+        return TaskResponse.error(
+            task_id=task_id,
+            error=TaskErrorInfo(code="TASK_TIMEOUT", message=f"wait_for_task timed out after {timeout}s"),
         )
 
     async def find_node_remote(

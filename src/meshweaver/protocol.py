@@ -33,7 +33,10 @@ class MessageType(StrEnum):
     HANDSHAKE_ACK = "HANDSHAKE_ACK"
     HEARTBEAT = "HEARTBEAT"
     TASK_REQUEST = "TASK_REQUEST"
+    TASK_ACK = "TASK_ACK"
     TASK_RESPONSE = "TASK_RESPONSE"
+    TASK_STATUS_REQUEST = "TASK_STATUS_REQUEST"
+    TASK_STATUS_RESPONSE = "TASK_STATUS_RESPONSE"
     LOAD_REPORT = "LOAD_REPORT"
     GOSSIP = "GOSSIP"
     FIND_NODE = "FIND_NODE"
@@ -111,6 +114,37 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
         if "args" in payload and not isinstance(payload["args"], (list, tuple)):
             raise InvalidPayloadError("TASK_REQUEST 'args' must be a list or tuple")
 
+
+    elif message_type == MessageType.TASK_ACK:
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise InvalidPayloadError(
+                "TASK_ACK payload must include a non-empty string 'task_id'"
+            )
+        status = payload.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise InvalidPayloadError(
+                "TASK_ACK payload must include a non-empty string 'status'"
+            )
+
+    elif message_type == MessageType.TASK_STATUS_REQUEST:
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise InvalidPayloadError(
+                "TASK_STATUS_REQUEST payload must include a non-empty string 'task_id'"
+            )
+
+    elif message_type == MessageType.TASK_STATUS_RESPONSE:
+        task_id = payload.get("task_id")
+        status = payload.get("status")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise InvalidPayloadError(
+                "TASK_STATUS_RESPONSE payload must include a non-empty string 'task_id'"
+            )
+        if not isinstance(status, str) or not status.strip():
+            raise InvalidPayloadError(
+                "TASK_STATUS_RESPONSE payload must include a non-empty string 'status'"
+            )
 
     elif message_type == MessageType.TASK_RESPONSE:
         task_id = payload.get("task_id")

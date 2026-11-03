@@ -388,6 +388,7 @@ class TaskRequest:
     args: list[Any] = field(default_factory=list)
     kwargs: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    correlation_id: str | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -418,6 +419,7 @@ class TaskRequest:
         *,
         task_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> TaskRequest:
         """Factory method to construct and validate a TaskRequest instance."""
         final_id = task_id if task_id is not None else uuid.uuid4().hex
@@ -430,11 +432,12 @@ class TaskRequest:
             args=final_args,
             kwargs=final_kwargs,
             metadata=final_metadata,
+            correlation_id=correlation_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert task request to a JSON-compatible dictionary."""
-        return {
+        data: dict[str, Any] = {
             "task_id": self.task_id,
             "task_name": self.task_name,
             "task_type": self.task_name,
@@ -443,6 +446,9 @@ class TaskRequest:
             "params": self.kwargs,
             "metadata": self.metadata,
         }
+        if self.correlation_id is not None:
+            data["correlation_id"] = self.correlation_id
+        return data
 
     def to_json(self) -> str:
         """Serialize task request to a compact JSON string."""
@@ -465,6 +471,7 @@ class TaskRequest:
         raw_args = data.get("args", [])
         raw_kwargs = data.get("kwargs") if "kwargs" in data else data.get("params", {})
         raw_metadata = data.get("metadata", {})
+        raw_corr_id = data.get("correlation_id")
 
         return cls(
             task_id=task_id,
@@ -472,6 +479,7 @@ class TaskRequest:
             args=list(raw_args) if isinstance(raw_args, (list, tuple)) else raw_args,
             kwargs=dict(raw_kwargs) if isinstance(raw_kwargs, dict) else raw_kwargs,
             metadata=dict(raw_metadata) if isinstance(raw_metadata, dict) else raw_metadata,
+            correlation_id=str(raw_corr_id) if raw_corr_id is not None else None,
         )
 
     @classmethod
@@ -498,7 +506,7 @@ class TaskRequest:
             MessageType.TASK_REQUEST,
             sender_id=sender_id,
             recipient_id=recipient_id,
-            correlation_id=correlation_id or self.task_id,
+            correlation_id=correlation_id or self.correlation_id or self.task_id,
             message_id=message_id,
             payload=self.to_dict(),
         )
@@ -539,7 +547,7 @@ class TaskResponse:
     and metadata while enforcing strict type and size boundaries.
     """
 
-    __slots__ = ("task_id", "status", "result", "_error", "execution_time", "metadata")
+    __slots__ = ("task_id", "status", "result", "_error", "execution_time", "metadata", "correlation_id")
 
     def __init__(
         self,
@@ -549,6 +557,7 @@ class TaskResponse:
         error: TaskErrorInfo | dict[str, Any] | str | None = None,
         execution_time: float | None = None,
         metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         self.task_id = task_id
         if isinstance(status, str):
@@ -565,7 +574,17 @@ class TaskResponse:
         self._error: TaskErrorInfo | None = self._coerce_error(error) if error is not None else None
         self.execution_time = execution_time
         self.metadata: dict[str, Any] = dict(metadata) if metadata is not None else {}
+        self.correlation_id: str | None = correlation_id
         self.validate()
+
+    @property
+    def ack(self) -> Any:
+        """Return acknowledgement metadata if attached."""
+        return self.metadata.get("ack")
+
+    @ack.setter
+    def ack(self, value: Any) -> None:
+        self.metadata["ack"] = value
 
     def validate(self) -> None:
         """
@@ -607,6 +626,7 @@ class TaskResponse:
         *,
         execution_time: float | None = None,
         metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> TaskResponse:
         """Factory method to construct a successful TaskResponse."""
         return cls(
@@ -616,6 +636,7 @@ class TaskResponse:
             error=None,
             execution_time=execution_time,
             metadata=metadata,
+            correlation_id=correlation_id,
         )
 
     @classmethod
@@ -626,6 +647,7 @@ class TaskResponse:
         *,
         execution_time: float | None = None,
         metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> TaskResponse:
         """Factory method to construct a failed TaskResponse."""
         return cls(
@@ -635,6 +657,7 @@ class TaskResponse:
             error=error,
             execution_time=execution_time,
             metadata=metadata,
+            correlation_id=correlation_id,
         )
 
     @_ErrorClassMethodOrProperty
@@ -645,6 +668,7 @@ class TaskResponse:
         *,
         execution_time: float | None = None,
         metadata: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
     ) -> TaskResponse:
         """Factory method to construct an error TaskResponse."""
         if isinstance(error, Exception):
@@ -658,6 +682,7 @@ class TaskResponse:
             error=err_info,
             execution_time=execution_time,
             metadata=metadata,
+            correlation_id=correlation_id,
         )
 
     @staticmethod
@@ -675,7 +700,7 @@ class TaskResponse:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert task response to a JSON-compatible dictionary."""
-        return {
+        data: dict[str, Any] = {
             "task_id": self.task_id,
             "status": self.status.value,
             "result": self.result,
@@ -683,6 +708,9 @@ class TaskResponse:
             "execution_time": self.execution_time,
             "metadata": self.metadata,
         }
+        if self.correlation_id is not None:
+            data["correlation_id"] = self.correlation_id
+        return data
 
     def to_json(self) -> str:
         """Serialize task response to a compact JSON string."""
@@ -709,6 +737,7 @@ class TaskResponse:
             error=data.get("error"),
             execution_time=data.get("execution_time"),
             metadata=data.get("metadata", {}),
+            correlation_id=data.get("correlation_id"),
         )
 
     @classmethod
@@ -735,7 +764,7 @@ class TaskResponse:
             MessageType.TASK_RESPONSE,
             sender_id=sender_id,
             recipient_id=recipient_id,
-            correlation_id=correlation_id or self.task_id,
+            correlation_id=correlation_id or self.correlation_id or self.task_id,
             message_id=message_id,
             payload=self.to_dict(),
         )
@@ -747,7 +776,11 @@ class TaskResponse:
             raise InvalidTaskError(
                 f"Expected MessageType.TASK_RESPONSE, got {message.message_type}"
             )
-        return cls.from_dict(message.payload)
+        data = dict(message.payload)
+        # If payload already has correlation_id, use it; otherwise attach message.correlation_id
+        if "correlation_id" not in data and message.correlation_id and message.correlation_id != message.payload.get("task_id"):
+            data["correlation_id"] = message.correlation_id
+        return cls.from_dict(data)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TaskResponse):
@@ -765,8 +798,400 @@ class TaskResponse:
         return (
             f"TaskResponse(task_id={self.task_id!r}, status={self.status!r}, "
             f"result={self.result!r}, error={self.error!r}, "
-            f"execution_time={self.execution_time!r}, metadata={self.metadata!r})"
+            f"execution_time={self.execution_time!r}, metadata={self.metadata!r}, "
+            f"correlation_id={self.correlation_id!r})"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAck:
+    """
+    Validated, JSON-compatible task acknowledgement schema.
+
+    Encapsulates acknowledgement status, correlation ID, task ID,
+    routed peer ID, and metadata confirming receipt and scheduling.
+    """
+
+    task_id: str
+    correlation_id: str
+    status: str = "accepted"
+    routed_to: str | None = None
+    timestamp: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate TaskAck field invariants and constraints."""
+        validate_task_id(self.task_id)
+        if not isinstance(self.correlation_id, str) or not self.correlation_id.strip():
+            raise InvalidTaskError("TaskAck 'correlation_id' must be a non-empty string")
+        if not isinstance(self.status, str) or not self.status.strip():
+            raise InvalidTaskError("TaskAck 'status' must be a non-empty string")
+        if self.routed_to is not None and (not isinstance(self.routed_to, str) or not self.routed_to.strip()):
+            raise InvalidTaskError("TaskAck 'routed_to' must be a non-empty string or None")
+        if not isinstance(self.metadata, dict):
+            raise InvalidTaskError("TaskAck 'metadata' must be a dictionary")
+
+    @property
+    def is_accepted(self) -> bool:
+        """Return True if the task was accepted for execution or routing."""
+        return self.status.lower() in ("accepted", "routed", "acknowledged", "executing")
+
+    @property
+    def is_duplicate(self) -> bool:
+        """Return True if this acknowledgement was generated for a duplicate submission."""
+        return bool(self.metadata.get("duplicate") or self.status.lower() == "duplicate")
+
+    @property
+    def is_routed(self) -> bool:
+        """Return True if the task was scheduled/routed to a designated worker."""
+        return self.routed_to is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert acknowledgement to a JSON-compatible dictionary."""
+        return {
+            "task_id": self.task_id,
+            "correlation_id": self.correlation_id,
+            "status": self.status,
+            "routed_to": self.routed_to,
+            "timestamp": self.timestamp,
+            "metadata": dict(self.metadata),
+        }
+
+    def to_json(self) -> str:
+        """Serialize acknowledgement to a compact JSON string."""
+        return json.dumps(self.to_dict(), separators=(",", ":"), ensure_ascii=False)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> TaskAck:
+        """Construct and validate a TaskAck from a dictionary."""
+        if not isinstance(data, dict):
+            raise InvalidTaskError(f"Expected dict for TaskAck, got {type(data).__name__}")
+        task_id = str(data.get("task_id", ""))
+        correlation_id = str(data.get("correlation_id", data.get("task_id", "")))
+        status = str(data.get("status", "accepted"))
+        routed_to = data.get("routed_to")
+        timestamp = float(data.get("timestamp", time.time()))
+        metadata = dict(data.get("metadata", {}))
+        return cls(
+            task_id=task_id,
+            correlation_id=correlation_id,
+            status=status,
+            routed_to=routed_to,
+            timestamp=timestamp,
+            metadata=metadata,
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> TaskAck:
+        """Construct and validate a TaskAck from a JSON string."""
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            raise InvalidTaskError(f"Malformed JSON in TaskAck: {exc.msg}") from exc
+        return cls.from_dict(data)
+
+    def to_message(
+        self,
+        sender_id: str,
+        *,
+        recipient_id: str | None = None,
+        correlation_id: str | None = None,
+        message_id: str | None = None,
+    ) -> Message:
+        """Convert acknowledgement into a protocol Message of type TASK_ACK."""
+        return Message.create(
+            MessageType.TASK_ACK,
+            sender_id=sender_id,
+            recipient_id=recipient_id,
+            correlation_id=correlation_id or self.correlation_id,
+            message_id=message_id,
+            payload=self.to_dict(),
+        )
+
+    @classmethod
+    def from_message(cls, message: Message) -> TaskAck:
+        """Construct a TaskAck from a received protocol Message."""
+        if message.message_type != MessageType.TASK_ACK:
+            raise InvalidTaskError(
+                f"Expected MessageType.TASK_ACK, got {message.message_type}"
+            )
+        data = dict(message.payload)
+        if "correlation_id" not in data and message.correlation_id:
+            data["correlation_id"] = message.correlation_id
+        return cls.from_dict(data)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStatusReport:
+    """
+    Validated, JSON-compatible task execution status query response.
+
+    Encapsulates lifecycle state, timestamps, duration, worker identification,
+    and partial or terminal execution results / structured errors.
+    """
+
+    task_id: str
+    status: TaskStatus
+    correlation_id: str | None = None
+    worker_peer_id: str | None = None
+    created_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    execution_time: float | None = None
+    result: Any = None
+    error: TaskErrorInfo | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate TaskStatusReport field invariants and constraints."""
+        validate_task_id(self.task_id)
+        if not isinstance(self.status, TaskStatus):
+            raise InvalidTaskError(f"Field 'status' must be a TaskStatus, got {self.status}")
+        if self.worker_peer_id is not None and not isinstance(self.worker_peer_id, str):
+            raise InvalidTaskError("Field 'worker_peer_id' must be a string or None")
+        if not isinstance(self.metadata, dict):
+            raise InvalidTaskError("Field 'metadata' must be a dictionary")
+
+    @property
+    def is_done(self) -> bool:
+        """Return True if the task has reached a terminal execution state."""
+        return self.status in (
+            TaskStatus.SUCCESS,
+            TaskStatus.FAILURE,
+            TaskStatus.ERROR,
+            TaskStatus.CANCELLED,
+        )
+
+    @property
+    def is_success(self) -> bool:
+        """Return True if the task completed successfully."""
+        return self.status == TaskStatus.SUCCESS
+
+    @property
+    def is_failed(self) -> bool:
+        """Return True if the task failed or resulted in error."""
+        return self.status in (TaskStatus.FAILURE, TaskStatus.ERROR)
+
+    @property
+    def is_running(self) -> bool:
+        """Return True if the task is actively running."""
+        return self.status == TaskStatus.RUNNING
+
+    @property
+    def is_pending(self) -> bool:
+        """Return True if the task is queued and pending execution."""
+        return self.status == TaskStatus.PENDING
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert status report to a JSON-compatible dictionary."""
+        return {
+            "task_id": self.task_id,
+            "status": self.status.value,
+            "correlation_id": self.correlation_id,
+            "worker_peer_id": self.worker_peer_id,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "execution_time": self.execution_time,
+            "result": self.result,
+            "error": self.error.to_dict() if self.error is not None else None,
+            "metadata": dict(self.metadata),
+        }
+
+    def to_json(self) -> str:
+        """Serialize status report to a compact JSON string."""
+        return json.dumps(self.to_dict(), separators=(",", ":"), ensure_ascii=False)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> TaskStatusReport:
+        """Construct and validate a TaskStatusReport from a dictionary."""
+        if not isinstance(data, dict):
+            raise InvalidTaskError(f"Expected dict for TaskStatusReport, got {type(data).__name__}")
+        raw_err = data.get("error")
+        err_info = None
+        if isinstance(raw_err, TaskErrorInfo):
+            err_info = raw_err
+        elif isinstance(raw_err, dict):
+            err_info = TaskErrorInfo.from_dict(raw_err)
+        elif isinstance(raw_err, str):
+            err_info = TaskErrorInfo(code="ERROR", message=raw_err)
+
+        raw_status = data.get("status", "pending")
+        status_enum = TaskStatus(raw_status) if not isinstance(raw_status, TaskStatus) else raw_status
+
+        return cls(
+            task_id=str(data.get("task_id", "")),
+            status=status_enum,
+            correlation_id=data.get("correlation_id"),
+            worker_peer_id=data.get("worker_peer_id"),
+            created_at=data.get("created_at"),
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+            execution_time=data.get("execution_time"),
+            result=data.get("result"),
+            error=err_info,
+            metadata=dict(data.get("metadata", {})),
+        )
+
+    @classmethod
+    def from_json(cls, json_str: str) -> TaskStatusReport:
+        """Construct and validate a TaskStatusReport from a JSON string."""
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            raise InvalidTaskError(f"Malformed JSON in TaskStatusReport: {exc.msg}") from exc
+        return cls.from_dict(data)
+
+    def to_message(
+        self,
+        sender_id: str,
+        *,
+        recipient_id: str | None = None,
+        correlation_id: str | None = None,
+        message_id: str | None = None,
+    ) -> Message:
+        """Convert status report into a protocol Message of type TASK_STATUS_RESPONSE."""
+        return Message.create(
+            MessageType.TASK_STATUS_RESPONSE,
+            sender_id=sender_id,
+            recipient_id=recipient_id,
+            correlation_id=correlation_id or self.correlation_id or self.task_id,
+            message_id=message_id,
+            payload=self.to_dict(),
+        )
+
+    @classmethod
+    def from_message(cls, message: Message) -> TaskStatusReport:
+        """Construct a TaskStatusReport from a received protocol Message."""
+        if message.message_type != MessageType.TASK_STATUS_RESPONSE:
+            raise InvalidTaskError(
+                f"Expected MessageType.TASK_STATUS_RESPONSE, got {message.message_type}"
+            )
+        data = dict(message.payload)
+        if "correlation_id" not in data and message.correlation_id:
+            data["correlation_id"] = message.correlation_id
+        return cls.from_dict(data)
+
+
+class TaskDeduplicationStore:
+    """
+    In-memory deduplication and task state cache ensuring idempotent submissions,
+    preventing duplicate executions, and caching completed task outcomes.
+    """
+
+    def __init__(self, max_entries: int = 5000, ttl: float = 3600.0) -> None:
+        self.max_entries: int = max_entries
+        self.ttl: float = ttl
+        self._records: dict[str, dict[str, Any]] = {}
+        self._futures: dict[str, asyncio.Future[TaskResponse]] = {}
+
+    def is_duplicate(self, task_id: str) -> bool:
+        """Return True if task_id has been seen and is still valid within TTL."""
+        rec = self._records.get(task_id)
+        if rec is None:
+            return False
+        if time.time() - float(rec.get("timestamp", 0)) > self.ttl:
+            self._records.pop(task_id, None)
+            self._futures.pop(task_id, None)
+            return False
+        return True
+
+    def get_record(self, task_id: str) -> dict[str, Any] | None:
+        """Return tracked submission record or None if untracked/expired."""
+        if self.is_duplicate(task_id):
+            return self._records.get(task_id)
+        return None
+
+    def get_result(self, task_id: str) -> TaskResponse | None:
+        """Return cached terminal TaskResponse if task has completed, else None."""
+        rec = self.get_record(task_id)
+        if rec is not None:
+            return rec.get("response")
+        return None
+
+    def get_future(self, task_id: str) -> asyncio.Future[TaskResponse] | None:
+        """Return in-flight future for concurrent submitters awaiting the same task."""
+        if self.is_duplicate(task_id):
+            return self._futures.get(task_id)
+        return None
+
+    def register_submission(
+        self,
+        task_id: str,
+        correlation_id: str,
+        routed_to: str | None = None,
+        ack: TaskAck | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """
+        Register a task submission.
+
+        Returns:
+            tuple[bool, dict]: (is_new, record). If is_new is False, this is a duplicate.
+        """
+        now = time.time()
+        if self.is_duplicate(task_id):
+            existing = self._records[task_id]
+            return False, existing
+
+        if len(self._records) >= self.max_entries:
+            oldest_key = min(self._records, key=lambda k: self._records[k].get("timestamp", 0))
+            self._records.pop(oldest_key, None)
+            self._futures.pop(oldest_key, None)
+
+        record: dict[str, Any] = {
+            "task_id": task_id,
+            "correlation_id": correlation_id,
+            "routed_to": routed_to,
+            "ack": ack,
+            "status": TaskStatus.PENDING,
+            "response": None,
+            "timestamp": now,
+        }
+        self._records[task_id] = record
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._futures[task_id] = loop.create_future()
+        except RuntimeError:
+            pass
+
+        return True, record
+
+    def set_status(self, task_id: str, status: TaskStatus) -> None:
+        """Update the in-flight status for a tracked task."""
+        rec = self._records.get(task_id)
+        if rec is not None:
+            rec["status"] = status
+
+    def record_result(self, task_id: str, response: TaskResponse) -> None:
+        """Cache terminal execution response and resolve any in-flight futures."""
+        now = time.time()
+        rec = self._records.get(task_id)
+        if rec is not None:
+            rec["response"] = response
+            rec["status"] = response.status
+            rec["completed_at"] = now
+        else:
+            self._records[task_id] = {
+                "task_id": task_id,
+                "correlation_id": response.correlation_id or task_id,
+                "routed_to": None,
+                "ack": None,
+                "status": response.status,
+                "response": response,
+                "timestamp": now,
+                "completed_at": now,
+            }
+
+        fut = self._futures.get(task_id)
+        if fut is not None and not fut.done():
+            fut.set_result(response)
 
 
 # Type alias for task handlers

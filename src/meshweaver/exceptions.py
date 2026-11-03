@@ -83,6 +83,14 @@ class IncompatibleWorkerError(TaskSchedulingError):
     """Raised when a candidate worker does not support the requested task or requirements."""
 
 
+class DuplicateSubmissionError(TaskError):
+    """Raised when a duplicate task submission is detected and rejected."""
+
+
+class TaskNotFoundError(TaskError):
+    """Raised when an operation targets a task ID that does not exist or cannot be found."""
+
+
 class TaskTimeoutError(NetworkTimeoutError, TaskError):
     """Raised when remote task execution exceeds configured timeout."""
 

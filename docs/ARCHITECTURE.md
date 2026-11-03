@@ -319,6 +319,50 @@ The gossip protocol guarantees that workload state propagates to all connected p
         v [If Node B fails/times out -> Step 3 retries with next best candidate]
 ```
 
+### 7.1 Task Submission & Routing Workflow (Milestone 3)
+
+The complete end-to-end task routing workflow integrates the load-aware scheduler, peer discovery, networking, and worker execution:
+
+```
+   Client (Node A)             Gateway / Seed (Node B)         Compute Worker (Node C)
+          |                               |                               |
+          |-- 1. Bootstrap Discovery ---->|                               |
+          |<-- Peers List (Worker C) -----|                               |
+          |                                                               |
+          |-- 2. submit_task("power", 2, 10, task_id="T1", corr_id="C1") |
+          |      [Scheduler selects lowest-load Worker C]                 |
+          |      [TaskAck emitted: accepted, routed_to=Node C]            |
+          |                                                               |
+          |-- 3. TASK_REQUEST(task_id="T1", corr_id="C1") --------------> |
+          |                                                               |-- 4. Deduplication Check
+          |                                                               |      Set status: RUNNING
+          |                                                               |      Execute handler
+          |                                                               |
+          |-- 5. query_task_status("T1") -------------------------------> |
+          |<-- TASK_STATUS_RESPONSE(status="RUNNING") --------------------|
+          |                                                               |
+          |<-- 6. TASK_RESPONSE(status="SUCCESS", result=1024, corr_id="C1")
+          |
+          v [Cached in TaskDeduplicationStore: idempotent duplicate queries return cached result]
+```
+
+Key Workflow Components:
+1. **Correlation IDs**: Every task submission carries or generates a unique correlation ID (`correlation_id`) preserved across `TaskRequest`, wire protocol framing, `TaskAck` acknowledgement, status queries, and final `TaskResponse`.
+2. **Acknowledgements (`TaskAck`)**: Client immediately receives a structured acknowledgement (`task_id`, `correlation_id`, `status="accepted"`, `routed_to=worker_id`, `timestamp`), enabling non-blocking execution tracking.
+3. **Duplicate Submission Handling & Idempotency (`TaskDeduplicationStore`)**:
+   - In-memory store tracks seen tasks within a configurable TTL window (default: 3600s).
+   - Duplicate submissions detect prior completion and return cached results (`metadata={"duplicate": True}`) without duplicate worker execution.
+   - Concurrent submissions for in-flight tasks await the same execution future, preventing redundant compute.
+   - Asynchronous duplicate submissions return `TaskAck(status="duplicate", is_duplicate=True)`.
+4. **Execution Status Queries (`TaskStatusReport`)**:
+   - `query_task_status(task_id, target_peer_id)` queries real-time execution state (`PENDING`, `RUNNING`, `SUCCESS`, `FAILURE`, `ERROR`, `CANCELLED`) with duration, timestamps, result, or structured error.
+   - `wait_for_task(task_id)` polls status until terminal state is reached, returning the final `TaskResponse`.
+5. **Request Timeout Enforcement**:
+   - Slow or hanging tasks exceeding `timeout` terminate gracefully with structured `TASK_TIMEOUT` errors.
+   - Multi-candidate failover retries secondary workers when primary workers time out or disconnect.
+6. **Relay & Broker Routing**:
+   - Gateway/Broker nodes can receive tasks flagged with `metadata={"relay": True}` or `route_through`, forwarding tasks across the mesh to eligible compute workers and returning the result transparently.
+
 ---
 
 ## 8. Security Boundaries & Threat Model
@@ -365,5 +409,6 @@ MeshWeaver maintains a 100% automated test suite using `pytest` and `pytest-asyn
 - `tests/test_tasks.py`: Verifies task serialization, parameter limits, and injection prevention.
 - `tests/test_status.py`: Verifies `NodeStatusAPI` snapshot generation and CLI formatting.
 - `tests/test_remote_tasks.py`: End-to-end integration tests for multi-node task distribution, load-aware routing, and failover retries.
+- `tests/test_routing_workflow.py`: End-to-end three-node routing tests, TaskAck acknowledgements, duplicate submission idempotency, timeouts, and status queries.
 - `tests/test_multi_node.py`: Multi-node cluster verification testing discovery, gossip synchronization, and orderly shutdown.
 - `tests/test_two_peers_example.py`: Regression verification for the two-node communication demonstration script.

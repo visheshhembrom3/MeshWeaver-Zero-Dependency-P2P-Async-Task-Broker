@@ -700,6 +700,11 @@ class PeerRegistry:
             return len(self.list_active_peers(current_time=current_time))
         return len(self._peers)
 
+    @property
+    def peer_count(self) -> int:
+        """Return total count of tracked peers."""
+        return len(self._peers)
+
     def to_dict(self) -> dict[str, Any]:
         """Export registry state to dictionary."""
         return {
