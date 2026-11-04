@@ -679,7 +679,7 @@ class TaskScheduler:
 
         # 5. Peer health / failed peer exclusion
         if self.config.exclude_failed_peers:
-            if health_status == HealthStatus.UNHEALTHY:
+            if health_status == HealthStatus.UNHEALTHY or str(peer.metadata.get("health_status", "")).lower() in ("unhealthy", "failed"):
                 return WorkerEvaluation(
                     peer=peer,
                     is_eligible=False,
@@ -687,19 +687,27 @@ class TaskScheduler:
                     active_tasks=active_tasks,
                     cpu_percent=cpu_percent,
                     memory_percent=memory_percent,
-                    health_status=health_status,
+                    health_status=HealthStatus.UNHEALTHY,
                     report_timestamp=report_ts,
                     report_age=report_age,
                     is_report_stale=is_stale_report,
-                    rejection_reason="Worker peer health is UNHEALTHY (failed peer)",
+                    rejection_reason="Worker peer health is UNHEALTHY (failed/unresponsive peer)",
                 )
 
-            # Check explicit metadata markers for failed / disconnected peers
-            if peer.metadata.get("failed") is True or peer.metadata.get("status") in (
-                "failed",
-                "dead",
-                "unreachable",
-            ):
+            # Check explicit metadata markers for failed / disconnected / unresponsive peers
+            is_unresponsive = getattr(peer, "is_unresponsive", False) or bool(
+                peer.metadata.get("failed") is True
+                or peer.metadata.get("is_unresponsive") is True
+                or peer.metadata.get("status") in ("failed", "dead", "unreachable", "unresponsive")
+                or int(peer.metadata.get("missed_heartbeats", 0)) >= int(peer.metadata.get("max_missed_heartbeats", 3))
+            )
+            if is_unresponsive:
+                missed = peer.metadata.get("missed_heartbeats", 0)
+                reason = (
+                    f"Worker peer is unresponsive (missed {missed} heartbeats)"
+                    if missed
+                    else "Worker peer is marked as failed/unreachable"
+                )
                 return WorkerEvaluation(
                     peer=peer,
                     is_eligible=False,
@@ -707,11 +715,11 @@ class TaskScheduler:
                     active_tasks=active_tasks,
                     cpu_percent=cpu_percent,
                     memory_percent=memory_percent,
-                    health_status=health_status,
+                    health_status=HealthStatus.UNHEALTHY,
                     report_timestamp=report_ts,
                     report_age=report_age,
                     is_report_stale=is_stale_report,
-                    rejection_reason="Worker peer is marked as failed/unreachable",
+                    rejection_reason=reason,
                 )
 
         # 6. Task compatibility check
@@ -988,6 +996,9 @@ class TaskScheduler:
             )
         )
         return explanations
+
+    # Alias for candidate evaluation
+    evaluate_candidate = evaluate_worker
 
 
 # Alias for load-aware task scheduler

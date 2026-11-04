@@ -242,6 +242,41 @@ class PeerRecord:
         """Port of the peer's endpoint."""
         return self.endpoint.port
 
+    @property
+    def missed_heartbeats(self) -> int:
+        """Return the count of consecutive missed heartbeats for this peer."""
+        return int(self.metadata.get("missed_heartbeats", 0))
+
+    @property
+    def health_status(self) -> Any:
+        """Return the current health status of this peer."""
+        from meshweaver.gossip import HealthStatus
+
+        raw = self.metadata.get("health_status")
+        if raw is not None:
+            try:
+                return HealthStatus(str(raw).lower())
+            except ValueError:
+                pass
+        st = self.state()
+        if st == PeerState.EXPIRED:
+            return HealthStatus.UNHEALTHY
+        if st == PeerState.STALE:
+            return HealthStatus.DEGRADED
+        return HealthStatus.HEALTHY
+
+    @property
+    def is_unresponsive(self) -> bool:
+        """Return True if peer is marked unresponsive, failed, or exceeded heartbeat threshold."""
+        max_missed = int(self.metadata.get("max_missed_heartbeats", 3))
+        return bool(
+            self.metadata.get("is_unresponsive")
+            or self.metadata.get("failed")
+            or self.metadata.get("status") in ("failed", "dead", "unreachable", "unresponsive")
+            or str(self.metadata.get("health_status", "")).lower() in ("unhealthy", "failed", "unresponsive")
+            or self.missed_heartbeats >= max_missed
+        )
+
     def state(
         self,
         current_time: float | None = None,
@@ -501,6 +536,95 @@ class PeerRegistry:
     def touch(self, peer_id: str, current_time: float | None = None) -> PeerRecord:
         """Refresh the last_seen timestamp for a registered peer."""
         return self.update(peer_id, current_time=current_time)
+
+    def record_heartbeat_success(
+        self,
+        peer_id: str,
+        latency: float = 0.0,
+        rtt_ms: float | None = None,
+        current_time: float | None = None,
+    ) -> PeerRecord:
+        """
+        Record a successful heartbeat probe for a peer node.
+
+        Resets missed heartbeat counter, transitions health status to HEALTHY,
+        and refreshes last_seen timestamp.
+        """
+        existing = self.get(peer_id)
+        if existing is None:
+            raise PeerNotFoundError(f"Peer '{peer_id}' is not in the registry")
+
+        from meshweaver.gossip import HealthStatus
+
+        effective_latency = rtt_ms / 1000.0 if rtt_ms is not None else latency
+        now = current_time if current_time is not None else time.time()
+        meta = dict(existing.metadata)
+        meta["missed_heartbeats"] = 0
+        meta["health_status"] = HealthStatus.HEALTHY.value
+        meta["is_unresponsive"] = False
+        meta["failed"] = False
+        meta["last_heartbeat_at"] = now
+        meta["heartbeat_latency_ms"] = (
+            round(effective_latency * 1000, 2) if effective_latency < 1.0 else round(effective_latency, 2)
+        )
+
+        return self.update(peer_id, metadata=meta, current_time=now)
+
+    def record_heartbeat_failure(
+        self,
+        peer_id: str,
+        max_missed: int = 3,
+        current_time: float | None = None,
+    ) -> tuple[PeerRecord, Any]:
+        """
+        Record a missed/failed heartbeat probe or worker disconnect for a peer node.
+
+        Increments consecutive missed heartbeats and transitions health:
+        - 1 missed heartbeat: DEGRADED
+        - >= max_missed: UNHEALTHY (unresponsive, marked failed)
+
+        Returns:
+            tuple[PeerRecord, HealthStatus]: Updated record and new health status.
+        """
+        existing = self.get(peer_id)
+        if existing is None:
+            raise PeerNotFoundError(f"Peer '{peer_id}' is not in the registry")
+
+        from meshweaver.gossip import HealthStatus
+
+        now = current_time if current_time is not None else time.time()
+        meta = dict(existing.metadata)
+        missed = int(meta.get("missed_heartbeats", 0)) + 1
+        meta["missed_heartbeats"] = missed
+        meta["max_missed_heartbeats"] = max_missed
+        meta["last_heartbeat_failure_at"] = now
+
+        if missed >= max_missed:
+            new_health = HealthStatus.UNHEALTHY
+            meta["is_unresponsive"] = True
+            meta["failed"] = True
+        else:
+            new_health = HealthStatus.DEGRADED
+            meta["is_unresponsive"] = False
+
+        meta["health_status"] = new_health.value
+        updated = self.update(peer_id, metadata=meta, current_time=now)
+        return updated, new_health
+
+    def get_peer_health(
+        self,
+        peer_id: str,
+        current_time: float | None = None,
+    ) -> Any | None:
+        """Return the current HealthStatus of a registered peer."""
+        record = self.get(peer_id)
+        if record is None:
+            return None
+        return record.health_status
+
+    def list_unresponsive_peers(self) -> list[PeerRecord]:
+        """Return all tracked peers currently marked unresponsive or unhealthy."""
+        return [p for p in self._peers.values() if p.is_unresponsive]
 
     def remove(self, peer_id: str) -> PeerRecord | None:
         """

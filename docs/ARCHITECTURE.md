@@ -387,8 +387,10 @@ MeshWeaver implements an intentional educational security architecture designed 
 
 | Failure Scenario | Detection Mechanism | Recovery & Mitigation |
 |---|---|---|
-| **Worker Crash Before Execution** | Correlated RPC timeout (`TaskTimeoutError`) or TCP disconnect (`ConnectionClosedError`). | Client scheduler marks primary candidate unresponsive and fails over to secondary candidate worker. |
-| **Worker Crash During Execution** | Socket disconnection mid-stream. | Disconnect detected; task error returned to caller. MeshWeaver enforces at-most-once semantics to prevent duplicate side effects. |
+| **Heartbeat Miss / Network Stall** | Active HEARTBEAT probe timeout or connection drop. | Consecutive missed heartbeats incremented; peer transitions from `HEALTHY` -> `DEGRADED` (1 miss) -> `UNHEALTHY` (>= threshold). Unhealthy peers are automatically excluded by the scheduler. |
+| **Worker Crash Before Execution** | Correlated RPC timeout (`TaskTimeoutError`) or TCP disconnect (`ConnectionClosedError`). | Client scheduler marks primary candidate failed and initiates bounded retry on secondary candidate worker. |
+| **Worker Disconnect Mid-Execution** | Sub-millisecond TCP stream EOF or socket close detected by `_connection_read_loop`. In-flight request future immediately fails with `ConnectionClosedError`. | Task ownership record (`TaskOwnership`) tracks failed attempt and error history. Client reassigns task to next eligible worker under bounded retry limit (`max_retries`). Provides at-least-once execution semantics (retrying may execute task more than once if worker ran computation before disconnecting; exactly-once execution is not claimed). |
+| **Persistent Cluster Failure / Worker Outage** | Bounded retry limit exhausted (`retry_count >= max_retries`). | Retries halted deterministically; client returns structured `MAX_RETRIES_EXCEEDED` or `NO_PEERS_AVAILABLE` error with ownership metadata and error history. Infinite loops prevented. |
 | **Peer Unresponsive in DHT Lookup** | Per-query timeout (`query_timeout = 2.0s`). | Node flagged as unresponsive in `IterativeLookup.unresponsive_nodes`; lookup proceeds with remaining candidates. |
 | **Routing Table Bucket Saturation** | Bucket capacity $k=20$ reached. | New contact placed in `replacement_cache`. If an existing contact drops or is pruned, cached contact is promoted. |
 | **Network Partition / Gossip Stale** | Peer report age exceeds `stale_threshold` (30s). | Peer marked `STALE`. If age exceeds `ttl` (60s), record is purged from `GossipStore` and `PeerRegistry`. |
@@ -396,7 +398,47 @@ MeshWeaver implements an intentional educational security architecture designed 
 
 ---
 
-## 10. Verification & Test Architecture
+## 10. Heartbeat Monitoring & At-Least-Once Fault Recovery
+
+### 10.1 Active Heartbeat Probing
+Each `PeerNode` can maintain an active `HeartbeatMonitor` operating with configurable parameters:
+- `heartbeat_interval`: Time between periodic probe rounds (default: 1.0s).
+- `missed_heartbeat_threshold`: Consecutive probe failures required before declaring a node `UNHEALTHY` (default: 3).
+- `probe_timeout`: Socket read timeout for probe replies (default: 1.0s).
+
+Probing nodes send `HEARTBEAT` messages; receiving peers touch peer freshness and reply immediately with `HEARTBEAT_ACK`. Response round-trip time (RTT) is recorded to track network latency.
+
+### 10.2 Peer Health State Transitions
+Peers deterministically transition through three operational health states:
+1. `HEALTHY`: Peer is responsive, recent heartbeat succeeded, and consecutive misses are 0.
+2. `DEGRADED`: A single heartbeat probe timed out or failed. Node remains eligible for scheduling but incurs an evaluation penalty (+50.0).
+3. `UNHEALTHY`: Consecutive missed heartbeats reached or exceeded the configured threshold, or a socket disconnection occurred mid-execution. The peer is marked `is_unresponsive=True` and is strictly excluded from `TaskScheduler` candidate selection.
+4. **Recovery**: A subsequent successful heartbeat probe resets consecutive misses to 0, transitions health status back to `HEALTHY`, and notifies registered recovery callbacks.
+
+### 10.3 Fast Connection Failure Detection
+MeshWeaver maps in-flight request message IDs to active connections (`_connection_requests: dict[int, set[str]]`). When a TCP connection is closed or receives EOF (e.g., when a worker process crashes, terminates, or drops its socket), `_connection_read_loop` immediately fails all pending in-flight request futures on that connection with `ConnectionClosedError`. This provides sub-millisecond failure detection without waiting for multi-second application timeouts.
+
+### 10.4 Task Ownership & Bounded Retries
+Distributed tasks track ownership via `TaskOwnership`:
+- `task_id`: Unique identifier of the task.
+- `owner_id`: Node ID of the client peer that submitted the task.
+- `assigned_worker_id`: Currently assigned worker peer ID.
+- `worker_history`: List of all worker peer IDs to which the task has been assigned.
+- `retry_count`: Number of retry attempts executed so far.
+- `max_retries`: Maximum allowed retry attempts (default: 2).
+- `error_history`: Chronological log of error messages from failed attempts.
+
+When a worker disconnects mid-execution or fails to respond, `submit_task` records the failure on the `TaskOwnership` record, marks the worker as unresponsive in the scheduler, logs an at-least-once execution warning, and selects the next healthy candidate worker. If `retry_count` reaches `max_retries`, execution halts deterministically and returns a structured `MAX_RETRIES_EXCEEDED` error.
+
+### 10.5 Execution Semantics: At-Least-Once (Not Exactly-Once)
+> [!IMPORTANT]
+> Retrying a distributed task upon worker disconnection or timeout provides **at-least-once execution semantics**. If a worker disconnects after completing or partially completing computation (for example, if the worker finished calculating the result but crashed before the TCP packet was received by the client), retrying the task on another worker will execute the handler a second time.
+>
+> MeshWeaver explicitly **does not claim or guarantee exactly-once execution** for retried tasks. Handlers intended for distributed retry should ideally be idempotent or side-effect-free. Retried task responses carry explicit metadata annotations: `retried=True`, `execution_semantics="at-least-once"`, and an informative warning string.
+
+---
+
+## 11. Verification & Test Architecture
 
 MeshWeaver maintains a 100% automated test suite using `pytest` and `pytest-asyncio`:
 
@@ -410,5 +452,6 @@ MeshWeaver maintains a 100% automated test suite using `pytest` and `pytest-asyn
 - `tests/test_status.py`: Verifies `NodeStatusAPI` snapshot generation and CLI formatting.
 - `tests/test_remote_tasks.py`: End-to-end integration tests for multi-node task distribution, load-aware routing, and failover retries.
 - `tests/test_routing_workflow.py`: End-to-end three-node routing tests, TaskAck acknowledgements, duplicate submission idempotency, timeouts, and status queries.
+- `tests/test_heartbeat_failure.py`: Tests heartbeat probing, health transitions (HEALTHY -> DEGRADED -> UNHEALTHY), recovery, scheduler exclusion of unresponsive peers, fast worker disconnection handling, bounded retry limits, and at-least-once execution semantics.
 - `tests/test_multi_node.py`: Multi-node cluster verification testing discovery, gossip synchronization, and orderly shutdown.
 - `tests/test_two_peers_example.py`: Regression verification for the two-node communication demonstration script.

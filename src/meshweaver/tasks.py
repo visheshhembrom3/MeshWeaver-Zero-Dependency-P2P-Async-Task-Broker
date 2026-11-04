@@ -1079,6 +1079,88 @@ class TaskStatusReport:
         return cls.from_dict(data)
 
 
+@dataclass
+class TaskOwnership:
+    """
+    Tracking record for distributed task ownership, worker assignment, and retry bounds.
+
+    Note on Execution Semantics:
+        Retrying a task upon worker disconnection or timeout provides at-least-once
+        execution semantics and may execute the task more than once if the worker
+        performed computation before dropping the connection. MeshWeaver explicitly
+        does not guarantee exactly-once execution for retried distributed tasks.
+    """
+
+    task_id: str
+    owner_id: str
+    assigned_worker_id: str | None = None
+    retry_count: int = 0
+    max_retries: int = 2
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    last_assigned_at: float | None = None
+    completed_at: float | None = None
+    worker_history: list[str] = field(default_factory=list)
+    error_history: list[str] = field(default_factory=list)
+
+    @property
+    def can_retry(self) -> bool:
+        """Return True if task has remaining retry budget."""
+        return self.retry_count < self.max_retries
+
+    @property
+    def is_terminal(self) -> bool:
+        """Return True if task reached terminal state."""
+        return self.status in ("completed", "failed", "exhausted")
+
+    def assign_worker(self, worker_id: str) -> None:
+        """Assign task to a worker candidate."""
+        self.assigned_worker_id = worker_id
+        self.last_assigned_at = time.time()
+        self.status = "assigned"
+        if worker_id not in self.worker_history:
+            self.worker_history.append(worker_id)
+
+    def record_failure(self, error_message: str) -> bool:
+        """
+        Record worker failure or disconnection.
+
+        Returns:
+            bool: True if task is eligible for another retry attempt,
+                  False if bounded retry limit (max_retries) is reached.
+        """
+        self.error_history.append(error_message)
+        self.retry_count += 1
+        if self.can_retry:
+            self.status = "retrying"
+            return True
+        else:
+            self.status = "failed"
+            return False
+
+    def record_success(self) -> None:
+        """Mark task as successfully completed."""
+        self.status = "completed"
+        self.completed_at = time.time()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert task ownership details to a JSON-compatible dictionary."""
+        return {
+            "task_id": self.task_id,
+            "owner_id": self.owner_id,
+            "assigned_worker_id": self.assigned_worker_id,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "status": self.status,
+            "created_at": self.created_at,
+            "last_assigned_at": self.last_assigned_at,
+            "completed_at": self.completed_at,
+            "worker_history": list(self.worker_history),
+            "error_history": list(self.error_history),
+            "execution_semantics": "at-least-once",
+        }
+
+
 class TaskDeduplicationStore:
     """
     In-memory deduplication and task state cache ensuring idempotent submissions,
@@ -1127,6 +1209,8 @@ class TaskDeduplicationStore:
         correlation_id: str,
         routed_to: str | None = None,
         ack: TaskAck | None = None,
+        owner_id: str | None = None,
+        max_retries: int = 2,
     ) -> tuple[bool, dict[str, Any]]:
         """
         Register a task submission.
@@ -1144,11 +1228,22 @@ class TaskDeduplicationStore:
             self._records.pop(oldest_key, None)
             self._futures.pop(oldest_key, None)
 
+        ownership = TaskOwnership(
+            task_id=task_id,
+            owner_id=owner_id or "local",
+            assigned_worker_id=routed_to,
+            max_retries=max_retries,
+            created_at=now,
+        )
+        if routed_to:
+            ownership.assign_worker(routed_to)
+
         record: dict[str, Any] = {
             "task_id": task_id,
             "correlation_id": correlation_id,
             "routed_to": routed_to,
             "ack": ack,
+            "ownership": ownership,
             "status": TaskStatus.PENDING,
             "response": None,
             "timestamp": now,
@@ -1163,11 +1258,57 @@ class TaskDeduplicationStore:
 
         return True, record
 
+    def get_ownership(self, task_id: str) -> TaskOwnership | None:
+        """Retrieve the TaskOwnership record for a tracked task, if any."""
+        rec = self.get_record(task_id)
+        if rec is not None:
+            return rec.get("ownership")
+        return None
+
+    def record_retry(
+        self,
+        task_id: str,
+        new_worker_id: str,
+        error_message: str,
+    ) -> tuple[bool, int]:
+        """
+        Record a failed attempt and reassign task to a new worker.
+
+        Returns:
+            tuple[bool, int]: (can_retry, current_retry_count)
+        """
+        rec = self.get_record(task_id)
+        if rec is None:
+            return False, 0
+
+        ownership: TaskOwnership | None = rec.get("ownership")
+        if ownership is None:
+            ownership = TaskOwnership(
+                task_id=task_id,
+                owner_id="local",
+                assigned_worker_id=new_worker_id,
+            )
+            rec["ownership"] = ownership
+
+        can_retry = ownership.record_failure(error_message)
+        if can_retry:
+            ownership.assign_worker(new_worker_id)
+            rec["routed_to"] = new_worker_id
+            rec["status"] = TaskStatus.PENDING
+
+        return can_retry, ownership.retry_count
+
     def set_status(self, task_id: str, status: TaskStatus) -> None:
         """Update the in-flight status for a tracked task."""
         rec = self._records.get(task_id)
         if rec is not None:
             rec["status"] = status
+            ownership: TaskOwnership | None = rec.get("ownership")
+            if ownership is not None:
+                if status == TaskStatus.RUNNING:
+                    ownership.status = "running"
+                elif status in (TaskStatus.SUCCESS, TaskStatus.FAILURE, TaskStatus.ERROR):
+                    ownership.status = status.value
 
     def record_result(self, task_id: str, response: TaskResponse) -> None:
         """Cache terminal execution response and resolve any in-flight futures."""
@@ -1177,6 +1318,13 @@ class TaskDeduplicationStore:
             rec["response"] = response
             rec["status"] = response.status
             rec["completed_at"] = now
+            ownership: TaskOwnership | None = rec.get("ownership")
+            if ownership is not None:
+                if response.status == TaskStatus.SUCCESS:
+                    ownership.record_success()
+                else:
+                    ownership.status = "failed"
+                    ownership.completed_at = now
         else:
             self._records[task_id] = {
                 "task_id": task_id,

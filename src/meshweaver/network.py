@@ -146,6 +146,10 @@ class PeerNode:
         *,
         peer_registry: PeerRegistry | None = None,
         task_registry: Any | None = None,
+        heartbeat_interval: float = 1.0,
+        missed_heartbeat_threshold: int = 3,
+        heartbeat_timeout: float = 1.0,
+        enable_heartbeat: bool = False,
     ) -> None:
         self.peer_id: str = peer_id if peer_id and peer_id.strip() else uuid.uuid4().hex[:12]
         self.host: str = host
@@ -165,8 +169,22 @@ class PeerNode:
         self._listener_tasks: set[asyncio.Task[None]] = set()
         # Pending request-response futures: correlation_id/message_id -> Future[Message]
         self._pending_requests: dict[str, asyncio.Future[Message]] = {}
+        # Mapping of conn_id -> set of in-flight message_ids on that connection
+        self._connection_requests: dict[int, set[str]] = {}
         # Registered message handlers
         self._handlers: dict[MessageType, MessageHandler] = {}
+
+        # Heartbeat monitoring and failure detection
+        from meshweaver.heartbeat import HeartbeatMonitor
+
+        self.heartbeat_monitor: HeartbeatMonitor = HeartbeatMonitor(
+            self,
+            interval=heartbeat_interval,
+            missed_threshold=missed_heartbeat_threshold,
+            probe_timeout=heartbeat_timeout,
+            auto_start=False,
+        )
+        self._enable_heartbeat: bool = enable_heartbeat
 
         # Task registry for local task execution
         from meshweaver.tasks import TaskRegistry
@@ -588,8 +606,27 @@ class PeerNode:
             if self.gossip_engine is not None:
                 self.gossip_engine.store.remove(remote_node_id)
 
+        async def _handle_heartbeat(msg: Message, _conn: PeerConnection) -> Message:
+            if self.peer_registry.has_peer(msg.sender_id):
+                try:
+                    self.peer_registry.touch(msg.sender_id)
+                except Exception:
+                    pass
+            return Message.create(
+                MessageType.HEARTBEAT_ACK,
+                sender_id=self.peer_id,
+                recipient_id=msg.sender_id,
+                correlation_id=msg.message_id,
+                payload={
+                    "node_id": self.peer_id,
+                    "status": "ok",
+                    "timestamp": time.time(),
+                },
+            )
+
         self.register_handler(MessageType.PING, _handle_ping)
         self.register_handler(MessageType.HANDSHAKE, _handle_handshake)
+        self.register_handler(MessageType.HEARTBEAT, _handle_heartbeat)
         self.register_handler(MessageType.TASK_REQUEST, _handle_task_request)
         self.register_handler(MessageType.TASK_STATUS_REQUEST, _handle_task_status_request)
         self.register_handler(MessageType.FIND_NODE, _handle_find_node)
@@ -636,6 +673,25 @@ class PeerNode:
             self.gossip_engine.start()
         return self.gossip_engine
 
+    def enable_heartbeats(
+        self,
+        interval: float | None = None,
+        missed_threshold: int | None = None,
+        probe_timeout: float | None = None,
+    ) -> Any:
+        """
+        Enable and configure active heartbeat monitoring and failure detection.
+        """
+        if interval is not None:
+            self.heartbeat_monitor.interval = interval
+        if missed_threshold is not None:
+            self.heartbeat_monitor.missed_threshold = missed_threshold
+        if probe_timeout is not None:
+            self.heartbeat_monitor.probe_timeout = probe_timeout
+        self._enable_heartbeat = True
+        if self._is_running and not self.heartbeat_monitor.is_running:
+            self.heartbeat_monitor.start()
+        return self.heartbeat_monitor
 
     async def start(self) -> None:
         """
@@ -659,6 +715,9 @@ class PeerNode:
         if self.gossip_engine is not None and not self.gossip_engine.is_running:
             self.gossip_engine.start()
 
+        if (self._enable_heartbeat or self.heartbeat_monitor.is_running) and not self.heartbeat_monitor.is_running:
+            self.heartbeat_monitor.start()
+
         if hasattr(self, "execution_engine") and self.execution_engine is not None:
             if self.execution_engine.is_shutting_down:
                 from meshweaver.execution import TaskExecutionEngine
@@ -679,7 +738,11 @@ class PeerNode:
 
         self._is_running = False
 
-        # Stop gossip engine first
+        # Stop heartbeat monitor first
+        if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor.is_running:
+            await self.heartbeat_monitor.stop()
+
+        # Stop gossip engine
         if self.gossip_engine is not None and self.gossip_engine.is_running:
             await self.gossip_engine.stop()
 
@@ -898,6 +961,17 @@ class PeerNode:
             if conn.remote_peer_id and conn.remote_peer_id in self._peer_connections:
                 self._peer_connections.pop(conn.remote_peer_id, None)
 
+            # Immediately fail in-flight requests on this broken connection with ConnectionClosedError
+            pending_ids = self._connection_requests.pop(conn_id, set())
+            for msg_id in pending_ids:
+                fut = self._pending_requests.get(msg_id)
+                if fut is not None and not fut.done():
+                    fut.set_exception(
+                        ConnectionClosedError(
+                            f"Connection to worker {conn.remote_peer_id or conn.peer_address} closed while request was in-flight"
+                        )
+                    )
+
     async def send_request(
         self,
         connection: PeerConnection,
@@ -913,7 +987,9 @@ class PeerNode:
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Message] = loop.create_future()
+        conn_id = id(connection)
         self._pending_requests[message.message_id] = future
+        self._connection_requests.setdefault(conn_id, set()).add(message.message_id)
 
         try:
             await connection.send(message)
@@ -924,6 +1000,11 @@ class PeerNode:
             ) from exc
         finally:
             self._pending_requests.pop(message.message_id, None)
+            req_set = self._connection_requests.get(conn_id)
+            if req_set is not None:
+                req_set.discard(message.message_id)
+                if not req_set:
+                    self._connection_requests.pop(conn_id, None)
 
     async def send_message(self, connection: PeerConnection, message: Message) -> None:
         """Send a one-way message over an existing connection without awaiting reply."""
@@ -959,6 +1040,7 @@ class PeerNode:
         correlation_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         retry_on_failure: bool = True,
+        max_retries: int = 2,
         max_candidates: int = 3,
         wait: bool = True,
         on_ack: Any | None = None,
@@ -973,11 +1055,19 @@ class PeerNode:
         failover retry), and timeouts, returning a structured TaskResponse.
         """
         from meshweaver.exceptions import (
+            ConnectionClosedError,
             InvalidTaskError,
             NetworkTimeoutError,
             ValidationError,
         )
-        from meshweaver.tasks import TaskAck, TaskErrorInfo, TaskRequest, TaskResponse, TaskStatus
+        from meshweaver.tasks import (
+            TaskAck,
+            TaskErrorInfo,
+            TaskOwnership,
+            TaskRequest,
+            TaskResponse,
+            TaskStatus,
+        )
 
         corr_id = correlation_id or uuid.uuid4().hex
 
@@ -1050,84 +1140,128 @@ class PeerNode:
                     metadata={"duplicate": True, "already_submitted": True},
                 )
 
-        # 3. Identify candidate peers
-        candidates: list[tuple[str, str, int]] = []
-        if target_peer_id is not None:
-            if target_peer_id == self.peer_id:
-                # Local execution via execution engine
-                ack = TaskAck(
-                    task_id=req.task_id,
-                    correlation_id=corr_id,
-                    status="accepted",
-                    routed_to=self.peer_id,
-                    metadata={"worker": self.peer_id, "local": True},
-                )
-                self._task_dedup.register_submission(req.task_id, corr_id, routed_to=self.peer_id, ack=ack)
-                if on_ack is not None:
-                    try:
-                        on_ack(ack)
-                    except Exception:
-                        pass
-                if not wait:
-                    asyncio.create_task(self._execute_local_task(req, corr_id))
-                    return ack
-                resp = await self._execute_local_task(req, corr_id)
-                resp.metadata["ack"] = ack.to_dict()
-                return resp
-
-            rec = self.peer_registry.get(target_peer_id)
-            if rec is not None:
-                candidates.append((rec.peer_id, rec.host, rec.port))
-            else:
-                conn = self._peer_connections.get(target_peer_id)
-                if conn is not None and not conn.is_closed:
-                    addr = conn.peer_address
-                    candidates.append((target_peer_id, addr[0], addr[1]))
-                else:
-                    return TaskResponse.error(
-                        task_id=req.task_id,
-                        error=TaskErrorInfo(
-                            code="PEER_UNAVAILABLE",
-                            message=f"Target peer '{target_peer_id}' is not found or reachable in mesh",
-                        ),
-                        correlation_id=corr_id,
-                    )
-        else:
-            # Select candidate peers via scheduler (with router fallback)
-            candidate_records = []
-            if hasattr(self, "task_scheduler") and self.task_scheduler is not None:
+        # Local execution short-circuit
+        if target_peer_id is not None and target_peer_id == self.peer_id:
+            ack = TaskAck(
+                task_id=req.task_id,
+                correlation_id=corr_id,
+                status="accepted",
+                routed_to=self.peer_id,
+                metadata={"worker": self.peer_id, "local": True},
+            )
+            self._task_dedup.register_submission(
+                req.task_id,
+                corr_id,
+                routed_to=self.peer_id,
+                ack=ack,
+                owner_id=self.peer_id,
+                max_retries=max_retries,
+            )
+            if on_ack is not None:
                 try:
-                    candidate_records = self.task_scheduler.select_candidate_workers(
-                        req,
-                        count=max_candidates,
-                        exclude=[self.peer_id],
-                    )
+                    on_ack(ack)
                 except Exception:
                     pass
+            if not wait:
+                asyncio.create_task(self._execute_local_task(req, corr_id))
+                return ack
+            resp = await self._execute_local_task(req, corr_id)
+            resp.metadata["ack"] = ack.to_dict()
+            ownership = self._task_dedup.get_ownership(req.task_id)
+            if ownership is not None:
+                ownership.record_success()
+                resp.metadata["ownership"] = ownership.to_dict()
+            return resp
 
-            if not candidate_records:
-                candidate_records = self.task_router.select_candidates(
-                    req,
-                    count=max_candidates,
-                    exclude=[self.peer_id],
-                )
+        # Register submission and track task ownership
+        self._task_dedup.register_submission(
+            req.task_id,
+            corr_id,
+            routed_to=target_peer_id,
+            ack=None,
+            owner_id=self.peer_id,
+            max_retries=max_retries,
+        )
+        ownership = self._task_dedup.get_ownership(req.task_id)
+        if ownership is None:
+            ownership = TaskOwnership(
+                task_id=req.task_id,
+                owner_id=self.peer_id,
+                assigned_worker_id=target_peer_id,
+                max_retries=max_retries,
+            )
 
-            if not candidate_records:
-                return TaskResponse.error(
-                    task_id=req.task_id,
-                    error=TaskErrorInfo(
-                        code="NO_PEERS_AVAILABLE",
-                        message="No available or reachable worker peers found in mesh to route task",
-                    ),
-                    correlation_id=corr_id,
-                )
-            candidates = [(c.peer_id, c.host, c.port) for c in candidate_records]
-
-        # 4. Dispatch task to candidate peer (with failover)
+        attempted_workers: list[str] = []
         last_error: TaskErrorInfo | None = None
-        for candidate_id, host, port in candidates:
-            conn = self._peer_connections.get(candidate_id)
 
+        while True:
+            # 3. Identify candidate peer for this attempt
+            if target_peer_id is not None:
+                if attempted_workers:
+                    # Pinned target peer was already attempted
+                    break
+                candidate_id = target_peer_id
+                rec = self.peer_registry.get(target_peer_id)
+                if rec is not None:
+                    host, port = rec.host, rec.port
+                else:
+                    conn = self._peer_connections.get(target_peer_id)
+                    if conn is not None and not conn.is_closed:
+                        addr = conn.peer_address
+                        host, port = addr[0], addr[1]
+                    else:
+                        return TaskResponse.error(
+                            task_id=req.task_id,
+                            error=TaskErrorInfo(
+                                code="PEER_UNAVAILABLE",
+                                message=f"Target peer '{target_peer_id}' is not found or reachable in mesh",
+                            ),
+                            correlation_id=corr_id,
+                        )
+            else:
+                # Select best available candidate peer via scheduler (excluding self & attempted workers)
+                candidate_records = []
+                if hasattr(self, "task_scheduler") and self.task_scheduler is not None:
+                    try:
+                        candidate_records = self.task_scheduler.select_candidate_workers(
+                            req,
+                            count=1,
+                            exclude=[self.peer_id] + attempted_workers,
+                        )
+                    except Exception:
+                        pass
+
+                if not candidate_records and hasattr(self, "task_router") and self.task_router is not None:
+                    try:
+                        candidate_records = self.task_router.select_candidates(
+                            req,
+                            count=1,
+                            exclude=[self.peer_id] + attempted_workers,
+                        )
+                    except Exception:
+                        pass
+
+                if not candidate_records:
+                    if not attempted_workers:
+                        return TaskResponse.error(
+                            task_id=req.task_id,
+                            error=TaskErrorInfo(
+                                code="NO_PEERS_AVAILABLE",
+                                message="No available or reachable worker peers found in mesh to route task",
+                            ),
+                            correlation_id=corr_id,
+                        )
+                    # All available candidate peers exhausted
+                    break
+
+                selected = candidate_records[0]
+                candidate_id, host, port = selected.peer_id, selected.host, selected.port
+
+            attempted_workers.append(candidate_id)
+            ownership.assign_worker(candidate_id)
+
+            # 4. Connect to candidate worker
+            conn = self._peer_connections.get(candidate_id)
             if conn is None or conn.is_closed:
                 try:
                     conn = await self.connect_to_peer(host, port, timeout=timeout, do_handshake=True)
@@ -1139,11 +1273,16 @@ class PeerNode:
                         port,
                         conn_exc,
                     )
+                    if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor is not None:
+                        self.heartbeat_monitor.record_peer_failure(candidate_id, f"Connection failed: {conn_exc}")
+                    self.peer_registry.record_heartbeat_failure(candidate_id, max_missed=1)
+
                     last_error = TaskErrorInfo(
                         code="PEER_UNREACHABLE",
                         message=f"Failed to connect to worker peer {candidate_id} at {host}:{port}: {conn_exc}",
                     )
-                    if retry_on_failure:
+                    can_retry = ownership.record_failure(f"Failed to connect to {candidate_id}: {conn_exc}")
+                    if retry_on_failure and can_retry:
                         continue
                     break
 
@@ -1155,7 +1294,11 @@ class PeerNode:
                 routed_to=candidate_id,
                 metadata={"worker": candidate_id, "host": host, "port": port},
             )
-            self._task_dedup.register_submission(req.task_id, corr_id, routed_to=candidate_id, ack=ack)
+            dedup_rec = self._task_dedup.get_record(req.task_id)
+            if dedup_rec is not None:
+                dedup_rec["ack"] = ack
+                dedup_rec["routed_to"] = candidate_id
+
             if on_ack is not None:
                 try:
                     on_ack(ack)
@@ -1171,22 +1314,62 @@ class PeerNode:
             msg = req.to_message(sender_id=self.peer_id, recipient_id=candidate_id, correlation_id=corr_id)
             try:
                 resp_msg = await self.send_request(conn, msg, timeout=timeout)
+            except (ConnectionClosedError, OSError) as conn_closed_exc:
+                logger.warning(
+                    "Worker %s disconnected during task %s execution: %s. "
+                    "Note: Retrying task provides at-least-once execution semantics and may execute "
+                    "the task more than once if %s performed computation before disconnecting; "
+                    "exactly-once execution is not guaranteed.",
+                    candidate_id,
+                    req.task_id,
+                    conn_closed_exc,
+                    candidate_id,
+                )
+                if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor is not None:
+                    self.heartbeat_monitor.record_peer_failure(candidate_id, f"Worker disconnected: {conn_closed_exc}")
+                self.peer_registry.record_heartbeat_failure(candidate_id, max_missed=1)
+
+                last_error = TaskErrorInfo(
+                    code="WORKER_DISCONNECTED",
+                    message=f"Worker {candidate_id} disconnected during task execution: {conn_closed_exc}",
+                )
+                can_retry = ownership.record_failure(f"Worker {candidate_id} disconnected: {conn_closed_exc}")
+                if retry_on_failure and can_retry:
+                    continue
+                break
             except NetworkTimeoutError as timeout_exc:
-                logger.warning("Task execution timed out on worker %s: %s", candidate_id, timeout_exc)
+                logger.warning(
+                    "Task %s execution timed out on worker %s: %s. "
+                    "Note: Retrying task provides at-least-once execution semantics and may execute "
+                    "the task more than once; exactly-once execution is not guaranteed.",
+                    req.task_id,
+                    candidate_id,
+                    timeout_exc,
+                )
+                if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor is not None:
+                    self.heartbeat_monitor.record_peer_failure(candidate_id, f"Timeout: {timeout_exc}")
+                self.peer_registry.record_heartbeat_failure(candidate_id, max_missed=1)
+
                 last_error = TaskErrorInfo(
                     code="TASK_TIMEOUT",
                     message=f"Task execution on worker {candidate_id} timed out after {timeout}s",
                 )
-                if retry_on_failure:
+                can_retry = ownership.record_failure(f"Worker {candidate_id} timed out: {timeout_exc}")
+                if retry_on_failure and can_retry:
                     continue
                 break
             except Exception as net_exc:
                 logger.warning("Communication error during task exchange with %s: %s", candidate_id, net_exc)
+                if hasattr(self, "heartbeat_monitor") and self.heartbeat_monitor is not None:
+                    self.heartbeat_monitor.record_peer_failure(candidate_id, f"Communication error: {net_exc}")
+                self.peer_registry.record_heartbeat_failure(candidate_id, max_missed=1)
+
                 last_error = TaskErrorInfo(
                     code="COMMUNICATION_ERROR",
                     message=f"Communication error with worker {candidate_id}: {net_exc}",
                 )
-                if retry_on_failure:
+                can_retry = ownership.record_failure(f"Communication error with {candidate_id}: {net_exc}")
+                if retry_on_failure and can_retry:
                     continue
                 break
 
@@ -1195,6 +1378,18 @@ class PeerNode:
                     resp = TaskResponse.from_message(resp_msg)
                     resp.correlation_id = corr_id
                     resp.metadata["ack"] = ack.to_dict()
+                    resp.metadata["ownership"] = ownership.to_dict()
+                    ownership.record_success()
+                    if ownership.retry_count > 0:
+                        resp.metadata["retried"] = True
+                        resp.metadata["retry_count"] = ownership.retry_count
+                        resp.metadata["worker_history"] = list(ownership.worker_history)
+                        resp.metadata["execution_semantics"] = "at-least-once"
+                        resp.metadata["execution_warning"] = (
+                            "Retrying a task provides at-least-once execution semantics; "
+                            "the task may have executed more than once if the prior worker "
+                            "disconnected after starting execution."
+                        )
                     self._task_dedup.record_result(req.task_id, resp)
                     return resp
                 except Exception as parse_exc:
@@ -1215,6 +1410,7 @@ class PeerNode:
                     ),
                     correlation_id=corr_id,
                 )
+                err_resp.metadata["ownership"] = ownership.to_dict()
                 self._task_dedup.record_result(req.task_id, err_resp)
                 return err_resp
             else:
@@ -1227,14 +1423,27 @@ class PeerNode:
                     correlation_id=corr_id,
                 )
 
+        # 5. Handle terminal failure when retry bounds are exhausted or no more peers
+        if ownership.retry_count >= max_retries and last_error is not None:
+            err_code = "MAX_RETRIES_EXCEEDED"
+            err_msg = (
+                f"Task {req.task_id} failed after {ownership.retry_count} retries: "
+                f"retry limit ({max_retries}) reached. Last error: {last_error.message}"
+            )
+        elif last_error is not None:
+            err_code = last_error.code
+            err_msg = last_error.message
+        else:
+            err_code = "ROUTING_FAILED"
+            err_msg = "Failed to route task to any candidate peer"
+
         final_err_resp = TaskResponse.error(
             task_id=req.task_id,
-            error=last_error if last_error else TaskErrorInfo(
-                code="ROUTING_FAILED",
-                message="Failed to route task to any candidate peer",
-            ),
+            error=TaskErrorInfo(code=err_code, message=err_msg),
             correlation_id=corr_id,
         )
+        final_err_resp.metadata["ownership"] = ownership.to_dict()
+        final_err_resp.metadata["execution_semantics"] = "at-least-once"
         self._task_dedup.record_result(req.task_id, final_err_resp)
         return final_err_resp
 

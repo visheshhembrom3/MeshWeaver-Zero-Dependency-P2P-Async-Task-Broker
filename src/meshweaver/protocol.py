@@ -32,6 +32,7 @@ class MessageType(StrEnum):
     HANDSHAKE = "HANDSHAKE"
     HANDSHAKE_ACK = "HANDSHAKE_ACK"
     HEARTBEAT = "HEARTBEAT"
+    HEARTBEAT_ACK = "HEARTBEAT_ACK"
     TASK_REQUEST = "TASK_REQUEST"
     TASK_ACK = "TASK_ACK"
     TASK_RESPONSE = "TASK_RESPONSE"
@@ -242,6 +243,16 @@ def _validate_payload_schema(message_type: MessageType, payload: dict[str, Any])
             peer_id = node.get("peer_id") or node.get("node_id")
             if not isinstance(peer_id, str) or not peer_id.strip():
                 raise InvalidPayloadError("Each node in 'nodes' must have a non-empty 'peer_id' or 'node_id'")
+
+    elif message_type in (MessageType.HEARTBEAT, MessageType.HEARTBEAT_ACK):
+        if "node_id" in payload and (not isinstance(payload["node_id"], str) or not payload["node_id"].strip()):
+            raise InvalidPayloadError(f"{message_type} 'node_id' must be a non-empty string if provided")
+        if "timestamp" in payload and (
+            isinstance(payload["timestamp"], bool)
+            or not isinstance(payload["timestamp"], (int, float))
+            or payload["timestamp"] < 0
+        ):
+            raise InvalidPayloadError(f"{message_type} 'timestamp' must be a non-negative number if provided")
 
     elif message_type == MessageType.LEAVE:
         node_id = payload.get("node_id")

@@ -142,3 +142,23 @@ class StaleResourceReportError(StaleDataError, TaskSchedulingError):
 class InvalidReportError(ValidationError, GossipError):
     """Raised when a resource or gossip report fails validation."""
 
+
+class HeartbeatError(PeerConnectionError):
+    """Base exception for heartbeat probing and failure detection errors."""
+
+
+class HeartbeatTimeoutError(HeartbeatError, NetworkTimeoutError):
+    """Raised when a heartbeat probe to a remote peer times out."""
+
+
+class PeerUnresponsiveError(HeartbeatError):
+    """Raised when a peer node misses heartbeats beyond the configured threshold."""
+
+
+class WorkerDisconnectedError(TaskError, ConnectionClosedError):
+    """Raised when a remote worker peer disconnects while executing an in-flight task."""
+
+
+class TaskRetryExhaustedError(TaskError):
+    """Raised when task execution fails across all bounded retry attempts."""
+
