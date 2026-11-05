@@ -214,6 +214,8 @@ class TaskRouter:
                 continue
             if not include_stale and state == PeerState.STALE:
                 continue
+            if record.is_unresponsive or record.metadata.get("failed") or record.metadata.get("is_unresponsive"):
+                continue
             candidates.append(record)
 
         if not candidates:

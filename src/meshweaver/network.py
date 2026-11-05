@@ -430,22 +430,8 @@ class PeerNode:
                     pass
 
             # 5. Local worker execution
-            self._active_task_counter += 1
-            self._task_dedup.set_status(task_req.task_id, TaskStatus.RUNNING)
-            try:
-                task_resp = await self.execution_engine.execute_request(task_req)
-            except Exception as exec_exc:
-                task_resp = TaskResponse.error(
-                    task_id=task_req.task_id,
-                    error=TaskErrorInfo(code="EXECUTION_ERROR", message=str(exec_exc)),
-                    correlation_id=corr_id,
-                )
-            finally:
-                self._active_task_counter = max(0, self._active_task_counter - 1)
-
-            task_resp.correlation_id = corr_id
+            task_resp = await self._execute_local_task(task_req, corr_id)
             task_resp.metadata["ack"] = ack.to_dict()
-            self._task_dedup.record_result(task_req.task_id, task_resp)
 
             return task_resp.to_message(
                 sender_id=self.peer_id,
@@ -1030,6 +1016,40 @@ class PeerNode:
         self._task_dedup.record_result(req.task_id, task_resp)
         return task_resp
 
+    def select_candidate_workers(
+        self,
+        task_request: Any,
+        *,
+        count: int = 1,
+        exclude: list[str] | set[str] | None = None,
+    ) -> list[Any]:
+        """
+        Select candidate worker peers using the TaskScheduler with TaskRouter fallback.
+        """
+        exclude_list = list(exclude) if exclude else [self.peer_id]
+        candidate_records = []
+        if hasattr(self, "task_scheduler") and self.task_scheduler is not None:
+            try:
+                candidate_records = self.task_scheduler.select_candidate_workers(
+                    task_request,
+                    count=count,
+                    exclude=exclude_list,
+                )
+            except Exception:
+                pass
+
+        if not candidate_records and hasattr(self, "task_router") and self.task_router is not None:
+            try:
+                candidate_records = self.task_router.select_candidates(
+                    task_request,
+                    count=count,
+                    exclude=exclude_list,
+                )
+            except Exception:
+                pass
+
+        return candidate_records
+
     async def submit_task(
         self,
         task_name_or_request: str | Any,
@@ -1220,26 +1240,11 @@ class PeerNode:
                         )
             else:
                 # Select best available candidate peer via scheduler (excluding self & attempted workers)
-                candidate_records = []
-                if hasattr(self, "task_scheduler") and self.task_scheduler is not None:
-                    try:
-                        candidate_records = self.task_scheduler.select_candidate_workers(
-                            req,
-                            count=1,
-                            exclude=[self.peer_id] + attempted_workers,
-                        )
-                    except Exception:
-                        pass
-
-                if not candidate_records and hasattr(self, "task_router") and self.task_router is not None:
-                    try:
-                        candidate_records = self.task_router.select_candidates(
-                            req,
-                            count=1,
-                            exclude=[self.peer_id] + attempted_workers,
-                        )
-                    except Exception:
-                        pass
+                candidate_records = self.select_candidate_workers(
+                    req,
+                    count=1,
+                    exclude=[self.peer_id] + attempted_workers,
+                )
 
                 if not candidate_records:
                     if not attempted_workers:

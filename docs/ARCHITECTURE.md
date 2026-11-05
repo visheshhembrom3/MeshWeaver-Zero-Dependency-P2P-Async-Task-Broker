@@ -453,5 +453,6 @@ MeshWeaver maintains a 100% automated test suite using `pytest` and `pytest-asyn
 - `tests/test_remote_tasks.py`: End-to-end integration tests for multi-node task distribution, load-aware routing, and failover retries.
 - `tests/test_routing_workflow.py`: End-to-end three-node routing tests, TaskAck acknowledgements, duplicate submission idempotency, timeouts, and status queries.
 - `tests/test_heartbeat_failure.py`: Tests heartbeat probing, health transitions (HEALTHY -> DEGRADED -> UNHEALTHY), recovery, scheduler exclusion of unresponsive peers, fast worker disconnection handling, bounded retry limits, and at-least-once execution semantics.
+- `tests/test_workflow_integration.py`: End-to-end integration tests validating the complete task lifecycle (submission, ACK, load-aware routing, execution, result retrieval, status queries), application exceptions (`TaskErrorInfo`), unavailable workers (`NO_PEERS_AVAILABLE`, `PEER_UNAVAILABLE`), request timeout enforcement (`TASK_TIMEOUT`), worker socket disconnection recovery, and bounded retries.
 - `tests/test_multi_node.py`: Multi-node cluster verification testing discovery, gossip synchronization, and orderly shutdown.
 - `tests/test_two_peers_example.py`: Regression verification for the two-node communication demonstration script.
