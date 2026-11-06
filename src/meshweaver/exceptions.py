@@ -43,6 +43,26 @@ class HandshakeError(PeerConnectionError):
     """Raised when a peer-to-peer handshake fails."""
 
 
+class SecurityError(MeshWeaverError):
+    """Base exception for all security, authentication, and integrity errors."""
+
+
+class AuthenticationError(SecurityError, PeerConnectionError):
+    """Raised when peer identity authentication or authorization fails."""
+
+
+class IntegrityError(SecurityError, ProtocolError):
+    """Raised when message HMAC signature or cryptographic integrity check fails."""
+
+
+class ReplayAttackError(SecurityError, ProtocolError):
+    """Raised when a replayed or expired message is detected."""
+
+
+class PayloadLimitExceededError(SecurityError, ValidationError):
+    """Raised when a message or frame size exceeds configured security limits."""
+
+
 class TaskError(MeshWeaverError):
     """Base exception for task-related errors."""
 

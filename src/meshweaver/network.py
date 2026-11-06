@@ -46,11 +46,13 @@ class PeerConnection:
         *,
         remote_peer_id: str | None = None,
         is_inbound: bool = False,
+        security_manager: Any | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
         self.remote_peer_id = remote_peer_id
         self.is_inbound = is_inbound
+        self.security_manager = security_manager
         self.connected_at: float = time.time()
         self._closed: bool = False
         self._write_lock: asyncio.Lock = asyncio.Lock()
@@ -59,6 +61,25 @@ class PeerConnection:
     def is_closed(self) -> bool:
         """Check if the connection has been closed."""
         return self._closed or self.writer.is_closing()
+
+    @property
+    def is_tls(self) -> bool:
+        """Return True if the underlying connection is encrypted with TLS."""
+        try:
+            return self.writer.get_extra_info("ssl_object") is not None
+        except Exception:
+            return False
+
+    @property
+    def peer_certificate(self) -> dict[str, Any] | None:
+        """Return the peer's decoded TLS certificate if available, or None."""
+        try:
+            ssl_obj = self.writer.get_extra_info("ssl_object")
+            if ssl_obj is not None:
+                return ssl_obj.getpeercert()
+        except Exception:
+            pass
+        return None
 
     @property
     def peer_address(self) -> tuple[str, int]:
@@ -77,6 +98,9 @@ class PeerConnection:
         """
         if self.is_closed:
             raise ConnectionClosedError("Cannot send on closed connection")
+
+        if self.security_manager is not None:
+            message = self.security_manager.prepare_outbound(message)
 
         async with self._write_lock:
             try:
@@ -150,6 +174,11 @@ class PeerNode:
         missed_heartbeat_threshold: int = 3,
         heartbeat_timeout: float = 1.0,
         enable_heartbeat: bool = False,
+        security_config: Any | None = None,
+        tls_config: Any | None = None,
+        shared_secret: bytes | str | None = None,
+        auth_token: str | None = None,
+        allowed_peers: list[str] | set[str] | None = None,
     ) -> None:
         self.peer_id: str = peer_id if peer_id and peer_id.strip() else uuid.uuid4().hex[:12]
         self.host: str = host
@@ -160,6 +189,21 @@ class PeerNode:
         self._bound_port: int | None = None
         self._server: asyncio.Server | None = None
         self._is_running: bool = False
+
+        # Peer security, TLS context, and authentication manager
+        from meshweaver.security import SecurityConfig, SecurityManager, TLSConfig
+
+        resolved_sec = security_config if security_config is not None else SecurityConfig()
+        if tls_config is not None:
+            resolved_sec.tls = tls_config
+        if shared_secret is not None:
+            resolved_sec.shared_secret = shared_secret
+        if auth_token is not None:
+            resolved_sec.auth_token = auth_token
+        if allowed_peers is not None:
+            resolved_sec.allowed_peers = set(allowed_peers)
+
+        self.security_manager: SecurityManager = SecurityManager(resolved_sec)
 
         # Active connections: internal mapping of id(conn) -> conn
         self._connections: dict[int, PeerConnection] = {}
@@ -322,6 +366,20 @@ class PeerNode:
             )
 
         async def _handle_handshake(msg: Message, conn: PeerConnection) -> Message:
+            from meshweaver.exceptions import AuthenticationError
+
+            try:
+                self.security_manager.validate_handshake(msg)
+            except AuthenticationError as auth_exc:
+                logger.warning("Handshake authentication failed from %s: %s", conn.peer_address, auth_exc)
+                return Message.create(
+                    MessageType.ERROR,
+                    sender_id=self.peer_id,
+                    recipient_id=msg.sender_id,
+                    correlation_id=msg.message_id,
+                    payload={"code": "AUTHENTICATION_FAILED", "message": str(auth_exc)},
+                )
+
             remote_node_id = str(msg.payload.get("node_id", msg.sender_id))
             conn.remote_peer_id = remote_node_id
             self._peer_connections[remote_node_id] = conn
@@ -343,6 +401,8 @@ class PeerNode:
                 "status": "accepted",
                 "supported_tasks": list(self.task_registry.list_tasks()),
             }
+            if self.security_manager.config.auth_token:
+                handshake_ack_payload["auth_token"] = self.security_manager.config.auth_token
             return Message.create(
                 MessageType.HANDSHAKE_ACK,
                 sender_id=self.peer_id,
@@ -686,10 +746,12 @@ class PeerNode:
         if self._is_running:
             return
 
+        server_ssl = self.security_manager.get_server_ssl_context()
         self._server = await asyncio.start_server(
             self._handle_inbound_stream,
             host=self.host,
             port=self.port,
+            ssl=server_ssl,
         )
 
         sockets = self._server.sockets
@@ -795,7 +857,7 @@ class PeerNode:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Handle incoming TCP socket connection from another peer."""
-        conn = PeerConnection(reader, writer, is_inbound=True)
+        conn = PeerConnection(reader, writer, is_inbound=True, security_manager=self.security_manager)
         self._connections[id(conn)] = conn
 
         task = asyncio.create_task(self._connection_read_loop(conn))
@@ -809,6 +871,7 @@ class PeerNode:
         timeout: float = 5.0,
         *,
         do_handshake: bool = True,
+        server_hostname: str | None = None,
     ) -> PeerConnection:
         """
         Connect to a remote peer over TCP, optionally performing the handshake.
@@ -821,9 +884,13 @@ class PeerNode:
             HandshakeError: If handshake response is invalid.
             PeerConnectionError: If network connection fails.
         """
+        client_ssl = self.security_manager.get_client_ssl_context()
+        effective_hostname = server_hostname or (
+            host if (client_ssl and self.security_manager.config.tls.check_hostname) else None
+        )
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
+                asyncio.open_connection(host, port, ssl=client_ssl, server_hostname=effective_hostname),
                 timeout=timeout,
             )
         except TimeoutError as exc:
@@ -831,7 +898,7 @@ class PeerNode:
         except (OSError, ConnectionRefusedError) as exc:
             raise PeerConnectionError(f"Failed to connect to {host}:{port}: {exc}") from exc
 
-        conn = PeerConnection(reader, writer, is_inbound=False)
+        conn = PeerConnection(reader, writer, is_inbound=False, security_manager=self.security_manager)
         self._connections[id(conn)] = conn
 
         if do_handshake:
@@ -841,6 +908,9 @@ class PeerNode:
                     "port": self.bound_port,
                     "supported_tasks": list(self.task_registry.list_tasks()),
                 }
+                if self.security_manager.config.auth_token:
+                    handshake_payload["auth_token"] = self.security_manager.config.auth_token
+
                 handshake_msg = Message.create(
                     MessageType.HANDSHAKE,
                     sender_id=self.peer_id,
@@ -848,9 +918,21 @@ class PeerNode:
                 )
                 await conn.send(handshake_msg)
                 resp = await conn.receive(timeout=timeout)
-                if resp is None or resp.message_type != MessageType.HANDSHAKE_ACK:
+                if resp is None:
                     await conn.close()
-                    raise HandshakeError(f"Expected HANDSHAKE_ACK, received {resp}")
+                    raise HandshakeError("Connection closed before HANDSHAKE_ACK was received")
+
+                if resp.message_type == MessageType.ERROR:
+                    err_detail = resp.payload.get("message", "Handshake rejected by remote peer")
+                    await conn.close()
+                    raise HandshakeError(f"Handshake rejected: {err_detail}")
+
+                if resp.message_type != MessageType.HANDSHAKE_ACK:
+                    await conn.close()
+                    raise HandshakeError(f"Expected HANDSHAKE_ACK, received {resp.message_type}")
+
+                # Validate remote peer credentials
+                self.security_manager.validate_handshake(resp)
 
                 remote_node_id = str(resp.payload.get("node_id", resp.sender_id))
                 conn.remote_peer_id = remote_node_id
@@ -902,6 +984,37 @@ class PeerNode:
 
                 if msg is None:
                     break
+
+                # Comprehensive security validation (replay, integrity, authorization, size limits)
+                from meshweaver.exceptions import (
+                    AuthenticationError,
+                    IntegrityError,
+                    PayloadLimitExceededError,
+                    ReplayAttackError,
+                    SecurityError,
+                )
+
+                try:
+                    self.security_manager.validate_inbound(msg, remote_peer_id=conn.remote_peer_id)
+                except (SecurityError, AuthenticationError, IntegrityError, ReplayAttackError, PayloadLimitExceededError) as sec_exc:
+                    logger.warning(
+                        "Security validation failed for message %s from %s: %s",
+                        msg.message_id,
+                        conn.peer_address,
+                        sec_exc,
+                    )
+                    try:
+                        err_reply = Message.create(
+                            MessageType.ERROR,
+                            sender_id=self.peer_id,
+                            recipient_id=msg.sender_id,
+                            correlation_id=msg.message_id,
+                            payload={"code": sec_exc.__class__.__name__, "message": str(sec_exc)},
+                        )
+                        await conn.send(err_reply)
+                    except Exception:
+                        pass
+                    continue
 
                 # Correlated response resolution
                 if msg.correlation_id and msg.correlation_id in self._pending_requests:

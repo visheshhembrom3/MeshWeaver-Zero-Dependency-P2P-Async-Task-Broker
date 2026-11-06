@@ -177,7 +177,7 @@ async def run_remote_tasks_demo(
         log_print(
             f"   [Task: add(125, 375)] -> Result: {resp_add.result} "
             f"(Status: {resp_add.status.value}, ID: {resp_add.task_id[:16]}..., "
-            f"Time: {resp_add.execution_time * 1000:.2f}ms)"
+            f"Time: {((resp_add.execution_time or 0.0) * 1000):.2f}ms)"
         )
         results["task_add"] = {
             "status": resp_add.status.value,

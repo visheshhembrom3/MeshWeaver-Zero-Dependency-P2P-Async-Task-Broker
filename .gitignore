@@ -36,3 +36,7 @@ Thumbs.db
 .env
 *.env
 local_config.json
+
+# Node & Frontend
+node_modules/
+web/node_modules/

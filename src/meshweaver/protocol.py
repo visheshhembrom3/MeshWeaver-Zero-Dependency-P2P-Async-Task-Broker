@@ -273,6 +273,7 @@ class Message:
     payload: dict[str, Any] = field(default_factory=dict)
     recipient_id: str | None = None
     correlation_id: str | None = None
+    signature: str | None = None
 
     @classmethod
     def create(
@@ -285,6 +286,7 @@ class Message:
         correlation_id: str | None = None,
         message_id: str | None = None,
         timestamp: float | None = None,
+        signature: str | None = None,
     ) -> Message:
         """
         Factory to construct and validate a new Message instance with sensible defaults.
@@ -316,6 +318,7 @@ class Message:
             payload=final_payload,
             recipient_id=recipient_id,
             correlation_id=correlation_id,
+            signature=signature,
         )
         msg.validate()
         return msg
@@ -356,6 +359,9 @@ class Message:
         ):
             raise ValidationError("Field 'correlation_id' must be None or a non-empty string")
 
+        if self.signature is not None and not isinstance(self.signature, str):
+            raise ValidationError("Field 'signature' must be None or a string")
+
         if not isinstance(self.payload, dict):
             raise InvalidPayloadError("Field 'payload' must be a dictionary")
 
@@ -370,7 +376,7 @@ class Message:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the message into a JSON-compatible dictionary."""
-        return {
+        d: dict[str, Any] = {
             "message_id": self.message_id,
             "message_type": self.message_type.value,
             "sender_id": self.sender_id,
@@ -379,6 +385,9 @@ class Message:
             "correlation_id": self.correlation_id,
             "payload": self.payload,
         }
+        if self.signature is not None:
+            d["signature"] = self.signature
+        return d
 
     def to_json(self) -> str:
         """Serialize the message into a compact JSON string."""
@@ -430,6 +439,7 @@ class Message:
             payload=data["payload"],
             recipient_id=data.get("recipient_id"),
             correlation_id=data.get("correlation_id"),
+            signature=data.get("signature"),
         )
         msg.validate()
         return msg
@@ -468,21 +478,21 @@ class Message:
         return cls.from_json(decoded)
 
 
-def encode_frame(message: Message) -> bytes:
+def encode_frame(message: Message, max_frame_size: int = MAX_FRAME_SIZE) -> bytes:
     """
     Encode a message into a length-prefixed frame.
     Format: 4-byte big-endian unsigned integer (frame length) + payload bytes.
     """
     serialized = message.serialize()
     frame_length = len(serialized)
-    if frame_length > MAX_FRAME_SIZE:
+    if frame_length > max_frame_size:
         raise MalformedMessageError(
-            f"Message size ({frame_length} bytes) exceeds MAX_FRAME_SIZE ({MAX_FRAME_SIZE} bytes)"
+            f"Message size ({frame_length} bytes) exceeds MAX_FRAME_SIZE ({max_frame_size} bytes)"
         )
     return struct.pack("!I", frame_length) + serialized
 
 
-def decode_frame(buffer: bytes) -> tuple[Message | None, bytes]:
+def decode_frame(buffer: bytes, max_frame_size: int = MAX_FRAME_SIZE) -> tuple[Message | None, bytes]:
     """
     Attempt to extract a complete message frame from an in-memory byte buffer.
 
@@ -493,9 +503,9 @@ def decode_frame(buffer: bytes) -> tuple[Message | None, bytes]:
         return None, buffer
 
     frame_length = struct.unpack("!I", buffer[:4])[0]
-    if frame_length > MAX_FRAME_SIZE:
+    if frame_length > max_frame_size:
         raise MalformedMessageError(
-            f"Frame length {frame_length} exceeds MAX_FRAME_SIZE {MAX_FRAME_SIZE}"
+            f"Frame length {frame_length} exceeds MAX_FRAME_SIZE {max_frame_size}"
         )
     if frame_length == 0:
         raise MalformedMessageError("Frame length must be greater than zero")
@@ -509,7 +519,7 @@ def decode_frame(buffer: bytes) -> tuple[Message | None, bytes]:
     return message, buffer[total_length:]
 
 
-async def read_frame(reader: asyncio.StreamReader) -> Message | None:
+async def read_frame(reader: asyncio.StreamReader, max_frame_size: int = MAX_FRAME_SIZE) -> Message | None:
     """
     Read a length-prefixed frame from an asyncio.StreamReader.
 
@@ -527,9 +537,9 @@ async def read_frame(reader: asyncio.StreamReader) -> Message | None:
         raise MalformedMessageError("Stream closed while reading frame header") from exc
 
     frame_length = struct.unpack("!I", header)[0]
-    if frame_length > MAX_FRAME_SIZE:
+    if frame_length > max_frame_size:
         raise MalformedMessageError(
-            f"Frame length {frame_length} exceeds MAX_FRAME_SIZE {MAX_FRAME_SIZE}"
+            f"Frame length {frame_length} exceeds MAX_FRAME_SIZE {max_frame_size}"
         )
     if frame_length == 0:
         raise MalformedMessageError("Frame length must be greater than zero")

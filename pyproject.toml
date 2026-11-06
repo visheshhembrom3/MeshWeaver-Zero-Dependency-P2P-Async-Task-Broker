@@ -35,6 +35,9 @@ dev = [
 metrics = [
     "psutil>=5.9.0",
 ]
+security = [
+    "cryptography>=42.0.0",
+]
 
 
 [project.scripts]
@@ -52,4 +55,5 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
     "ignore::ResourceWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]

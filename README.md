@@ -496,6 +496,188 @@ The node status subsystem unifies discovery, registry membership, connection sta
 | **Bounded Retries** | If a worker disconnects or fails mid-execution, `submit_task` marks the worker failed, logs an at-least-once warning, and reassigns the task to the next eligible worker. Halts deterministically with `MAX_RETRIES_EXCEEDED` when the retry limit is reached. |
 | **At-Least-Once Semantics** | Retrying tasks upon worker disconnect provides at-least-once execution semantics; tasks may execute more than once if a worker disconnected after starting computation. MeshWeaver explicitly does not claim exactly-once execution. |
 
+## Professional Web Dashboard & REST/WebSocket API
+
+MeshWeaver includes a professional, light-themed web dashboard and a FastAPI backend adapter that connects directly to the running `PeerNode` core.
+
+```text
+       MeshWeaver PeerNode (Python asyncio)
+          │  TCP Stream Framing (Kademlia DHT, Gossip, Heartbeats)
+          ▼
+   ┌──────────────────────────────────────────────┐
+   │         FastAPI Backend Adapter              │
+   │  REST Endpoints  │  WebSocket Live Stream    │
+   │  - /api/health   │  - /ws/events             │
+   │  - /api/peers    │    * Instant event push   │
+   │  - /api/tasks    │    * Periodic status sync │
+   │  - /api/metrics  │                           │
+   └──────────────────────┬───────────────────────┘
+                          │ HTTP / WS JSON
+                          ▼
+   ┌──────────────────────────────────────────────┐
+   │       React + TypeScript + Vite SPA          │
+   │  - Tailwind CSS Light Theme (#F8FAFC)        │
+   │  - Recharts Workload & Task Analytics        │
+   │  - Interactive SVG Network Topology Graph    │
+   │  - Strict Allowlist Task Dispatcher Form     │
+   └──────────────────────────────────────────────┘
+```
+
+### Dashboard Pages
+
+1. **Overview**: Key network KPIs (active peers, in-flight tasks, success rate, DHT contacts), task execution area chart, peer CPU utilization bar chart, recent tasks feed, and system event log.
+2. **Network Topology**: Interactive SVG topology canvas mapping the local coordinator and satellite peers, displaying live connection links, probe latencies, health states, and a click-to-inspect telemetry drawer.
+3. **Peers**: Searchable peer directory with lifecycle state filters, CPU and RAM load indicators, active task counters, heartbeat latency, and full peer metadata inspector.
+4. **Tasks**: Distributed task management interface with search, status filtering, execution duration, and an allowlisted task submission modal (supporting `add`, `reverse_string`, `echo`, and `ping` with zero arbitrary code execution).
+5. **Monitoring**: Recharts-powered telemetry displaying CPU load by peer, RAM usage by peer, task execution status distribution (Pie/Donut), and peer availability breakdown.
+6. **Events & Logs**: Real-time event log with severity filtering (`info`, `success`, `warning`, `error`), peer/task correlation tags, and expandable JSON metadata payloads.
+7. **Settings**: Configurable backend API target URL, connection testing button, background polling cadence selector (2s, 5s, 10s, manual), light theme verification, and system reliability specifications.
+
+### REST & WebSocket API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/health` | Health check returning node ID, bound TCP port, uptime, and running status. |
+| `GET` | `/api/node` | Comprehensive snapshot of local node resources, DHT ID, registered tasks, and heartbeat settings. |
+| `GET` | `/api/peers` | List all tracked mesh peers with CPU%, RAM%, active tasks, health, and latency. |
+| `GET` | `/api/peers/{peer_id}` | Detailed peer record, heartbeat probe history, and declared task capabilities. |
+| `GET` | `/api/tasks` | List all tracked tasks from deduplication and execution stores with status filtering. |
+| `GET` | `/api/tasks/{task_id}` | Retrieve specific task execution result, error info, and ownership retry history. |
+| `GET` | `/api/tasks/available` | List allowlisted task functions supported by the node's `TaskRegistry`. |
+| `POST` | `/api/tasks` | Submit an allowlisted task for mesh distribution with timeout and argument validation. |
+| `GET` | `/api/metrics` | Aggregated system metrics, task success rate, average duration, and peer loads. |
+| `GET` | `/api/events` | Chronological event stream with limit, severity, and event type filtering. |
+| `WS` | `/ws/events` | Live WebSocket stream pushing real-time events and 2.5s status heartbeats. |
+| `GET` | `/` | Serves the built production React SPA static assets directly from FastAPI. |
+
+### How to Run the Application
+
+#### 1. Backend Dashboard Server
+Start a MeshWeaver node with the FastAPI REST and WebSocket API adapter:
+```powershell
+python -m meshweaver dashboard --port 8001 --api-port 8000
+```
+- P2P Mesh Port: `8001`
+- Dashboard API & Web UI: `http://127.0.0.1:8000`
+- Interactive Swagger API Docs: `http://127.0.0.1:8000/docs`
+
+#### 2. Frontend Development Server (Optional)
+If modifying the frontend code, run the Vite development server with hot module reloading:
+```powershell
+cd web
+npm run dev
+```
+Open `http://localhost:5173` in your browser. Requests to `/api` and `/ws` automatically proxy to `http://127.0.0.1:8000`.
+
+#### 3. Production Frontend Build
+To compile the TypeScript/React frontend into static assets served directly by FastAPI:
+```powershell
+cd web
+npm run build
+```
+Once built, navigating to `http://127.0.0.1:8000` immediately serves the React SPA.
+
+### Running a Multi-Peer Demonstration with Dashboard
+
+To observe the dashboard in a distributed mesh environment with multiple peers:
+
+1. **Terminal 1 — Start Coordinator Node with Dashboard:**
+   ```powershell
+   python -m meshweaver dashboard --port 8001 --api-port 8000 --peer-id coordinator-alpha
+   ```
+
+2. **Terminal 2 — Start Worker Node Beta (joining Coordinator):**
+   ```powershell
+   python -m meshweaver start --port 8002 --peer-id worker-beta --seeds 127.0.0.1:8001
+   ```
+
+3. **Terminal 3 — Start Worker Node Gamma (joining Coordinator):**
+   ```powershell
+   python -m meshweaver start --port 8003 --peer-id worker-gamma --seeds 127.0.0.1:8001
+   ```
+
+4. **Open Dashboard:**
+   Open `http://127.0.0.1:8000` in your web browser. You will see:
+   - 3 nodes visible in the **Network Topology** graph with active TCP links.
+   - Live CPU, RAM, and heartbeat latency in the **Peers** table.
+   - Tasks submitted from the **Tasks** page dynamically routed to worker nodes based on composite load scores.
+
+### Peer Security & Authenticated Communication
+
+MeshWeaver includes a comprehensive, zero-dependency security layer for peer communication, supporting transport encryption, mutual certificate verification, authenticated control messages, and replay protection.
+
+#### 1. TLS and Mutual TLS (mTLS)
+Configurable using Python's standard `ssl.SSLContext`:
+- **Server TLS**: Nodes present an X.509 server certificate (`certfile`) and private key (`keyfile`) to encrypt peer-to-peer TCP connections.
+- **Client Verification**: Outbound connections verify the remote peer against trusted Certificate Authorities (`cafile` or system roots).
+- **Mutual TLS (mTLS)**: Nodes can require client certificates (`require_client_cert=True`), ensuring that only peers with certificates signed by the trusted cluster CA can connect.
+- **Modern Ciphers**: Restricts protocols to TLS 1.2+ and disables legacy SSLv2, SSLv3, TLS 1.0, and TLS 1.1.
+
+```python
+from meshweaver import PeerNode, TLSConfig
+
+# Coordinator / Server with TLS
+server_tls = TLSConfig(
+    enabled=True,
+    certfile="certs/server.pem",
+    keyfile="certs/server.key",
+    cafile="certs/ca.pem",
+    require_client_cert=True,  # Enforce mTLS
+)
+node = PeerNode(peer_id="coordinator", tls_config=server_tls)
+```
+
+#### 2. Message Integrity (HMAC-SHA256)
+When a `shared_secret` is configured:
+- Every outbound message is canonically serialized (sorted keys, compact JSON, excluding the signature field) and signed with HMAC-SHA256.
+- Inbound messages are verified before dispatch. Tampered payloads, modified message IDs, altered timestamps, or forged headers are immediately rejected with `IntegrityError`.
+
+```python
+# Enable HMAC-SHA256 signing with a pre-shared secret
+node = PeerNode(peer_id="worker-1", shared_secret="super-secret-cluster-key")
+```
+
+#### 3. Peer Authentication & Allowlisting
+- **Pre-Shared Bearer Token**: Nodes validate a pre-shared authentication token during initial TCP handshakes using constant-time string comparison (`secrets.compare_digest`). Peers lacking the valid token are rejected with `HandshakeError`.
+- **Authorized Peer Whitelist**: Nodes can configure `allowed_peers` to restrict connections exclusively to recognized peer identifiers.
+
+```python
+node = PeerNode(
+    peer_id="worker-2",
+    auth_token="cluster-auth-token-xyz",
+    allowed_peers={"coordinator", "worker-1", "worker-2"},
+)
+```
+
+#### 4. Replay Attack Mitigation
+A sliding timestamp window (`replay_window`, default 60s) validates message freshness and records seen message IDs in an in-memory cache with bounded TTL. Outdated messages, future clock drift (>30s), or replayed message IDs are rejected with `ReplayAttackError`.
+
+#### 5. Frame & Payload Size Limits
+Guards against memory exhaustion (DoS):
+- Inbound frames cannot exceed `max_frame_size` (default 4 MiB).
+- Inbound payloads cannot exceed `max_payload_size` (default 1 MiB).
+- Malformed inputs, null bytes, or oversized payloads are rejected without crashing the node.
+
+#### 6. Cryptographic Dependencies & Key Management
+- Built-in zero-dependency security uses Python's standard library `ssl`, `hmac`, `hashlib`, and `secrets`.
+- For advanced cryptographic workflows, `cryptography>=42.0.0` is declared as an optional dependency (`pip install "meshweaver[security]"`).
+- **Key Management Guidance**:
+  - Keep private keys (`*.key`) and shared secrets out of version control and Git.
+  - Store TLS private keys with restrictive OS filesystem permissions (`chmod 600`).
+  - Distribute shared HMAC secrets via environment variables or secret management vaults (e.g., HashiCorp Vault, AWS Secrets Manager).
+
+#### 7. Security Boundaries & Sandboxing Disclaimer
+> [!IMPORTANT]
+> **Arbitrary Python Execution Is NOT Sandboxed**:
+> MeshWeaver enforces a strict **task function allowlist** via `TaskRegistry` (`add`, `reverse_string`, `echo`, `ping`) and completely rejects unsafe pickle/cloudpickle deserialization, `eval`, `exec`, and bytecode injection.
+> However, task execution is performed directly in Python workers and **does NOT provide an OS-level, container-level, or hardware sandbox**. MeshWeaver should never execute arbitrary, untrusted remote Python code.
+
+### Security Guarantees & Known Limitations
+
+1. **Strict Function Allowlisting**: Task submission only permits execution of pre-registered functions declared in `node.task_registry`. Arbitrary Python expressions, `eval`, `exec`, dynamic imports, code objects, and pickle deserialization are blocked.
+2. **At-Least-Once Delivery**: Distributed task failover upon worker disconnection provides at-least-once execution semantics; tasks may execute more than once if a worker dropped connection mid-computation. MeshWeaver explicitly does not claim exactly-once execution.
+3. **Authenticated Transport**: Peer communication supports TLS 1.2+ encryption, mutual certificate validation (mTLS), HMAC-SHA256 message signing, replay protection, and bearer tokens. Cleartext TCP remains available for isolated local development.
+
 ### Week 4 — Security, CLI, and Dashboard
 - Add authentication and secure transport where practical.
 - Review message validation and execution boundaries.

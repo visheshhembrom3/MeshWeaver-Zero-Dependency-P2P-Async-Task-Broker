@@ -22,6 +22,46 @@ from meshweaver import __version__
 logger = logging.getLogger("meshweaver.cli")
 
 
+def build_security_config_from_args(args: Any) -> Any:
+    """Build SecurityConfig from parsed CLI arguments."""
+    from meshweaver.security import SecurityConfig, TLSConfig
+
+    cert_file = getattr(args, "cert_file", None)
+    key_file = getattr(args, "key_file", None)
+    ca_file = getattr(args, "ca_file", None)
+    tls_enabled = getattr(args, "tls", False) or bool(cert_file or ca_file)
+
+    tls_cfg = TLSConfig(
+        enabled=tls_enabled,
+        certfile=cert_file,
+        keyfile=key_file,
+        cafile=ca_file,
+        require_client_cert=getattr(args, "require_client_cert", False),
+    )
+
+    raw_peers = getattr(args, "allowed_peers", None)
+    allowed = {p.strip() for p in raw_peers.split(",") if p.strip()} if raw_peers else None
+
+    return SecurityConfig(
+        tls=tls_cfg,
+        shared_secret=getattr(args, "shared_secret", None),
+        auth_token=getattr(args, "auth_token", None),
+        allowed_peers=allowed,
+    )
+
+
+def add_security_arguments(p: argparse.ArgumentParser) -> None:
+    """Add TLS, authentication, and integrity options to a command subparser."""
+    p.add_argument("--tls", action="store_true", help="Enable TLS transport encryption")
+    p.add_argument("--cert", dest="cert_file", default=None, help="Path to certificate PEM file")
+    p.add_argument("--key", dest="key_file", default=None, help="Path to private key PEM file")
+    p.add_argument("--ca", dest="ca_file", default=None, help="Path to CA certificate PEM file")
+    p.add_argument("--require-client-cert", action="store_true", help="Require peer client certificate (mTLS)")
+    p.add_argument("--shared-secret", dest="shared_secret", default=None, help="Pre-shared HMAC secret for message integrity")
+    p.add_argument("--auth-token", dest="auth_token", default=None, help="Pre-shared peer authentication token")
+    p.add_argument("--allowed-peers", dest="allowed_peers", default=None, help="Comma-separated allowlist of peer IDs")
+
+
 async def run_status_cmd(
     host: str = "127.0.0.1",
     port: int = 0,
@@ -30,6 +70,7 @@ async def run_status_cmd(
     as_json: bool = False,
     timeout: float = 3.0,
     verbose: bool = False,
+    security_config: Any | None = None,
 ) -> int:
     """
     Start a local peer node, optionally join seed nodes, and print status.
@@ -40,7 +81,7 @@ async def run_status_cmd(
     setup_structured_logging(verbose=verbose, as_json=as_json)
 
     assigned_id = peer_id if peer_id else f"cli-node-{int(time.time() * 1000) % 100000}"
-    node = PeerNode(host=host, port=port, peer_id=assigned_id)
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
     node.enable_gossip()
     await node.start()
     try:
@@ -68,6 +109,7 @@ async def run_start_cmd(
     duration: float | None = None,
     verbose: bool = False,
     as_json: bool = False,
+    security_config: Any | None = None,
 ) -> int:
     """
     Start a MeshWeaver node that runs persistently, listens for tasks, and gossips.
@@ -78,7 +120,7 @@ async def run_start_cmd(
     setup_structured_logging(verbose=verbose, as_json=as_json)
 
     assigned_id = peer_id if peer_id else f"node-{int(time.time() * 1000) % 100000}"
-    node = PeerNode(host=host, port=port, peer_id=assigned_id)
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
     node.enable_gossip()
     await node.start()
 
@@ -119,6 +161,7 @@ async def run_submit_cmd(
     as_json: bool = False,
     timeout: float = 5.0,
     verbose: bool = False,
+    security_config: Any | None = None,
 ) -> int:
     """Start local peer node, discover mesh, submit task, and print result."""
     import json
@@ -128,7 +171,7 @@ async def run_submit_cmd(
     setup_structured_logging(verbose=verbose, as_json=as_json)
 
     assigned_id = peer_id if peer_id else f"cli-client-{int(time.time() * 1000) % 100000}"
-    node = PeerNode(host=host, port=port, peer_id=assigned_id)
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
     node.enable_gossip()
     await node.start()
     try:
@@ -157,6 +200,66 @@ async def run_submit_cmd(
         return 0 if resp.status.value == "success" else 1
     finally:
         await node.stop()
+
+
+async def run_dashboard_cmd(
+    host: str = "127.0.0.1",
+    port: int = 0,
+    api_host: str = "127.0.0.1",
+    api_port: int = 8000,
+    peer_id: str | None = None,
+    seeds: list[str] | None = None,
+    verbose: bool = False,
+    security_config: Any | None = None,
+) -> int:
+    """Start local peer node and launch FastAPI backend server with REST & WebSocket endpoints."""
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+    from meshweaver.api import create_api_app
+
+    setup_structured_logging(verbose=verbose, as_json=False)
+
+    assigned_id = peer_id if peer_id else f"dashboard-node-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
+    node.enable_gossip()
+    node.enable_heartbeats()
+    await node.start()
+
+    print(f"[MeshWeaver] PeerNode '{node.peer_id}' started on {node.host}:{node.bound_port}")
+    try:
+        if seeds:
+            print(f"[MeshWeaver] Joining mesh via seeds: {seeds}...")
+            await node.join_mesh(seeds, timeout=5.0)
+            print("[MeshWeaver] Successfully joined mesh via seeds.")
+
+        import uvicorn
+
+        app = create_api_app(node)
+        config = uvicorn.Config(
+            app=app,
+            host=api_host,
+            port=api_port,
+            log_level="info" if verbose else "warning",
+            access_log=verbose,
+        )
+        server = uvicorn.Server(config)
+
+        print(f"[MeshWeaver] Dashboard API listening at http://{api_host}:{api_port}")
+        print(f"[MeshWeaver] REST API Docs available at http://{api_host}:{api_port}/docs")
+        print("[MeshWeaver] Press Ctrl+C to terminate.")
+
+        await server.serve()
+        return 0
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        return 0
+    finally:
+        print(f"\n[MeshWeaver] Stopping node '{node.peer_id}'...")
+        try:
+            await node.leave_mesh()
+        except Exception:
+            pass
+        await node.stop()
+        print(f"[MeshWeaver] Node '{node.peer_id}' stopped gracefully.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -293,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Enable verbose debug logging",
     )
+    add_security_arguments(status_parser)
 
     demo_parser = subparsers.add_parser(
         "demo",
@@ -342,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     submit_parser.add_argument("--json", action="store_true", help="Output task response as JSON")
     submit_parser.add_argument("--timeout", type=float, default=5.0, help="Task timeout in seconds")
     submit_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(submit_parser)
 
     start_parser = subparsers.add_parser(
         "start",
@@ -355,6 +460,21 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--duration", type=float, default=None, help="Optional duration in seconds to keep node running")
     start_parser.add_argument("--json", action="store_true", help="Output status events in JSON format")
     start_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(start_parser)
+
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        aliases=["web", "ui"],
+        help="Launch MeshWeaver peer node and REST/WebSocket dashboard API server",
+    )
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="P2P network host interface (default: 127.0.0.1)")
+    dashboard_parser.add_argument("--port", type=int, default=0, help="P2P network port (default: 0 for dynamic)")
+    dashboard_parser.add_argument("--api-host", default="127.0.0.1", help="FastAPI dashboard host (default: 127.0.0.1)")
+    dashboard_parser.add_argument("--api-port", type=int, default=8000, help="FastAPI dashboard port (default: 8000)")
+    dashboard_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local node/peer identifier")
+    dashboard_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses")
+    dashboard_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(dashboard_parser)
 
     args = parser.parse_args(raw_args)
 
@@ -407,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_two_peers_demo())
         return 0
 
+    sec_config = build_security_config_from_args(args)
+
     # 4. Submit task subcommand
     if getattr(args, "command", None) == "submit":
         seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
@@ -421,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.json,
                 timeout=args.timeout,
                 verbose=args.verbose,
+                security_config=sec_config,
             )
         )
 
@@ -439,6 +562,26 @@ def main(argv: list[str] | None = None) -> int:
                 duration=getattr(args, "duration", None),
                 verbose=args.verbose,
                 as_json=args.json,
+                security_config=sec_config,
+            )
+        )
+
+    # 6. Dashboard / Web server subcommand
+    if getattr(args, "command", None) in ("dashboard", "web", "ui"):
+        seed_list = None
+        if args.seeds:
+            seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        return asyncio.run(
+            run_dashboard_cmd(
+                host=args.host,
+                port=args.port,
+                api_host=getattr(args, "api_host", "127.0.0.1"),
+                api_port=getattr(args, "api_port", 8000),
+                peer_id=args.peer_id,
+                seeds=seed_list,
+                verbose=args.verbose,
+                security_config=sec_config,
             )
         )
 
@@ -457,6 +600,7 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.json,
                 timeout=args.timeout,
                 verbose=args.verbose,
+                security_config=sec_config,
             )
         )
 
