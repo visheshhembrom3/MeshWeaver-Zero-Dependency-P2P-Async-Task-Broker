@@ -38,6 +38,9 @@ metrics = [
 security = [
     "cryptography>=42.0.0",
 ]
+cli = [
+    "rich>=13.0.0",
+]
 
 
 [project.scripts]

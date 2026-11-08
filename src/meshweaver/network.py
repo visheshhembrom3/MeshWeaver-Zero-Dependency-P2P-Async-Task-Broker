@@ -189,6 +189,7 @@ class PeerNode:
         self._bound_port: int | None = None
         self._server: asyncio.Server | None = None
         self._is_running: bool = False
+        self.started_at: float | None = None
 
         # Peer security, TLS context, and authentication manager
         from meshweaver.security import SecurityConfig, SecurityManager, TLSConfig
@@ -758,6 +759,7 @@ class PeerNode:
         if sockets:
             self._bound_port = sockets[0].getsockname()[1]
         self._is_running = True
+        self.started_at = time.time()
         logger.info("PeerNode %s listening on %s:%d", self.peer_id, self.host, self.bound_port)
 
         if self.gossip_engine is not None and not self.gossip_engine.is_running:

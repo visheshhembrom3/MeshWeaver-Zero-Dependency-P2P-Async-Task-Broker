@@ -6,6 +6,8 @@ asynchronous peer-to-peer networking, workload-aware task routing,
 and fault monitoring without external broker dependencies.
 """
 
+__version__: str = "0.1.0"
+
 from meshweaver.dht import (
     DEFAULT_ALPHA,
     DEFAULT_K,
@@ -192,6 +194,19 @@ from meshweaver.security import (
     sign_message,
     verify_message_integrity,
 )
+from meshweaver.cli_dashboard import (
+    HAS_RICH,
+    DashboardSnapshot,
+    NodeDashboardSummary,
+    PeerDashboardItem,
+    TaskDashboardItem,
+    format_peers_output,
+    format_tasks_output,
+    generate_dashboard_snapshot,
+    render_plain_text_dashboard,
+    render_rich_dashboard,
+    run_live_dashboard,
+)
 from meshweaver.worker import (
     DEFAULT_WORKER_CONCURRENCY,
     DEFAULT_WORKER_TIMEOUT,
@@ -204,8 +219,6 @@ from meshweaver.worker import (
     Worker,
     WorkerTaskState,
 )
-
-__version__: str = "0.1.0"
 
 __all__: list[str] = [
     "DEFAULT_ACTIVE_TASK_WEIGHT",
@@ -250,6 +263,7 @@ __all__: list[str] = [
     "MAX_TASK_RESULT_SIZE",
     "ConnectionClosedError",
     "DHTError",
+    "DashboardSnapshot",
     "DuplicatePeerError",
     "DuplicateSubmissionError",
     "GossipEngine",
@@ -261,6 +275,7 @@ __all__: list[str] = [
     "HeartbeatError",
     "HeartbeatMonitor",
     "HeartbeatTimeoutError",
+    "HAS_RICH",
     "IncompatibleWorkerError",
     "IntegrityError",
     "InvalidNodeIDError",
@@ -284,6 +299,7 @@ __all__: list[str] = [
     "NoAvailablePeerError",
     "NoEligibleWorkerError",
     "NodeID",
+    "NodeDashboardSummary",
     "NodeResourceReport",
     "NodeStatus",
     "NodeStatusAPI",
@@ -293,6 +309,7 @@ __all__: list[str] = [
     "PeerConnection",
     "PeerConnectionError",
     "PeerContact",
+    "PeerDashboardItem",
     "PeerEndpoint",
     "PeerHeartbeatState",
     "PeerNode",
@@ -321,6 +338,7 @@ __all__: list[str] = [
     "StaleResourceReportError",
     "TLSConfig",
     "TaskAck",
+    "TaskDashboardItem",
     "TaskDeduplicationStore",
     "TaskError",
     "TaskErrorInfo",
@@ -365,10 +383,16 @@ __all__: list[str] = [
     "find_closest_peers",
     "format_node_status",
     "format_peer_status_table",
+    "format_peers_output",
+    "format_tasks_output",
+    "generate_dashboard_snapshot",
     "get_node_status",
     "iterative_peer_lookup",
     "log_node_status",
     "read_frame",
+    "render_plain_text_dashboard",
+    "render_rich_dashboard",
+    "run_live_dashboard",
     "setup_structured_logging",
     "sign_message",
     "validate_host",

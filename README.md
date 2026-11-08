@@ -300,6 +300,78 @@ python -m meshweaver submit add 125 375 --seeds 127.0.0.1:8001
 python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
 ```
 
+### Interactive Terminal Dashboard & CLI Commands
+
+MeshWeaver features an interactive terminal monitoring dashboard built with [Rich](https://github.com/Textualize/rich), providing real-time operational visibility directly in your terminal, with an automatic zero-dependency plain-text ASCII fallback when Rich is not installed.
+
+#### 1. Live Terminal Monitoring Dashboard
+
+Launch the interactive dashboard to view the local node, discovered mesh peers, CPU and memory reports, peer health states, running tasks, and recent execution results/failures:
+
+```bash
+# Launch live dashboard (monitoring local node or cluster via seeds):
+python -m meshweaver monitor --seeds 127.0.0.1:8001
+
+# Start a persistent node with the live dashboard enabled:
+python -m meshweaver start --port 8001 --dashboard
+
+# Force plain-text ASCII output without Rich formatting:
+python -m meshweaver monitor --plain
+python -m meshweaver start --port 8001 --dashboard --plain
+
+# Configure custom refresh interval and run duration:
+python -m meshweaver monitor --refresh-rate 0.5 --duration 30
+```
+
+#### 2. Submitting Tasks via CLI
+
+Submit allowlisted tasks to a running mesh cluster for load-aware routing and remote execution:
+
+```bash
+# Submit an addition task:
+python -m meshweaver submit add 250 750 --seeds 127.0.0.1:8001
+
+# Submit a string reversal task:
+python -m meshweaver submit reverse_string "Distributed" --seeds 127.0.0.1:8001
+
+# Output task response as structured JSON:
+python -m meshweaver submit add 10 20 --seeds 127.0.0.1:8001 --json
+```
+
+#### 3. Listing Discovered Peers & Health States
+
+Inspect cluster topology, peer connectivity, gossip resource metrics (CPU/RAM), and failure states:
+
+```bash
+# Display formatted peers table:
+python -m meshweaver peers --seeds 127.0.0.1:8001
+
+# Output peers list in JSON format:
+python -m meshweaver peers --seeds 127.0.0.1:8001 --json
+
+# Force plain-text ASCII table:
+python -m meshweaver peers --seeds 127.0.0.1:8001 --plain
+```
+
+#### 4. Viewing Task Statuses & Execution History
+
+Query running tasks, recent results, and execution failures across the mesh:
+
+```bash
+# List all active and recent tasks:
+python -m meshweaver tasks --seeds 127.0.0.1:8001
+
+# Query a specific task ID:
+python -m meshweaver tasks task-9812a4b --seeds 127.0.0.1:8001
+
+# Output task records in JSON format:
+python -m meshweaver tasks --seeds 127.0.0.1:8001 --json
+```
+
+#### 5. Graceful Node Shutdown
+
+All long-running CLI commands (`start`, `monitor`, `dashboard`) trap `SIGINT` (Ctrl+C) and `asyncio.CancelledError`, automatically notifying peers with departure notifications (`leave_mesh()`), cancelling active workers, and releasing bound TCP sockets cleanly.
+
 ### Multi-Node Cluster Startup and Remote Task Execution
 
 Start independent peer nodes and dispatch tasks across the mesh using either the CLI or the Python API:

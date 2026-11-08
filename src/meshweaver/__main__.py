@@ -110,9 +110,13 @@ async def run_start_cmd(
     verbose: bool = False,
     as_json: bool = False,
     security_config: Any | None = None,
+    show_dashboard: bool = False,
+    refresh_rate: float = 1.0,
+    force_plain: bool = False,
 ) -> int:
     """
     Start a MeshWeaver node that runs persistently, listens for tasks, and gossips.
+    Optionally launches the interactive Rich/plain-text terminal dashboard.
     """
     from meshweaver.network import PeerNode
     from meshweaver.status import setup_structured_logging
@@ -122,6 +126,7 @@ async def run_start_cmd(
     assigned_id = peer_id if peer_id else f"node-{int(time.time() * 1000) % 100000}"
     node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
     node.enable_gossip()
+    node.enable_heartbeats()
     await node.start()
 
     print(f"[MeshWeaver] Node '{node.peer_id}' started on {node.host}:{node.bound_port}")
@@ -130,6 +135,17 @@ async def run_start_cmd(
             print(f"[MeshWeaver] Joining mesh via seeds: {seeds}...")
             await node.join_mesh(seeds, timeout=5.0)
             print("[MeshWeaver] Successfully joined mesh via seeds.")
+
+        if show_dashboard:
+            from meshweaver.cli_dashboard import run_live_dashboard
+
+            await run_live_dashboard(
+                node,
+                refresh_rate=refresh_rate,
+                duration=duration,
+                plain=force_plain,
+            )
+            return 0
 
         print(f"[MeshWeaver] Node '{node.peer_id}' is ready and accepting tasks. Press Ctrl+C to stop.")
 
@@ -142,7 +158,173 @@ async def run_start_cmd(
     except (asyncio.CancelledError, KeyboardInterrupt):
         return 0
     finally:
-        print(f"\n[MeshWeaver] Stopping node '{node.peer_id}'...")
+        print(f"\n[MeshWeaver] Stopping node '{node.peer_id}' gracefully...")
+        try:
+            await node.leave_mesh()
+        except Exception:
+            pass
+        await node.stop()
+        print(f"[MeshWeaver] Node '{node.peer_id}' stopped gracefully.")
+
+
+async def run_peers_cmd(
+    seeds: list[str] | None = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    peer_id: str | None = None,
+    as_json: bool = False,
+    force_plain: bool = False,
+    timeout: float = 3.0,
+    verbose: bool = False,
+    security_config: Any | None = None,
+) -> int:
+    """Start local peer node, discover mesh peers via seeds, and display peers table."""
+    from meshweaver.cli_dashboard import format_peers_output, generate_dashboard_snapshot
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+
+    setup_structured_logging(verbose=verbose, as_json=as_json)
+
+    assigned_id = peer_id if peer_id else f"cli-peers-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
+    node.enable_gossip()
+    node.enable_heartbeats()
+    await node.start()
+    try:
+        if seeds:
+            await node.join_mesh(seeds, timeout=timeout)
+            await asyncio.sleep(0.2)
+
+        snapshot = generate_dashboard_snapshot(node)
+        format_peers_output(snapshot.peers, as_json=as_json, force_plain=force_plain)
+        return 0
+    finally:
+        try:
+            await node.leave_mesh()
+        except Exception:
+            pass
+        await node.stop()
+
+
+async def run_tasks_cmd(
+    task_id: str | None = None,
+    seeds: list[str] | None = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    peer_id: str | None = None,
+    as_json: bool = False,
+    force_plain: bool = False,
+    timeout: float = 3.0,
+    verbose: bool = False,
+    security_config: Any | None = None,
+) -> int:
+    """Inspect status of running and recent tasks across the mesh or query specific task ID."""
+    from meshweaver.cli_dashboard import TaskDashboardItem, format_tasks_output, generate_dashboard_snapshot
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+
+    setup_structured_logging(verbose=verbose, as_json=as_json)
+
+    assigned_id = peer_id if peer_id else f"cli-tasks-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
+    node.enable_gossip()
+    await node.start()
+    try:
+        if seeds:
+            await node.join_mesh(seeds, timeout=timeout)
+            await asyncio.sleep(0.2)
+
+        snapshot = generate_dashboard_snapshot(node)
+
+        if task_id:
+            matched = [t for t in snapshot.running_tasks + snapshot.recent_tasks if t.task_id == task_id]
+            if not matched and seeds:
+                try:
+                    remote_resp = await node.query_task_status(task_id, timeout=timeout)
+                    if remote_resp is not None:
+                        dur = (
+                            round(remote_resp.execution_time * 1000, 2)
+                            if remote_resp.execution_time
+                            else None
+                        )
+                        res_p = (
+                            str(remote_resp.result)[:57]
+                            if remote_resp.result is not None
+                            else None
+                        )
+                        err_c = remote_resp.error.code if remote_resp.error else None
+                        err_m = remote_resp.error.message if remote_resp.error else None
+                        matched = [
+                            TaskDashboardItem(
+                                task_id=remote_resp.task_id,
+                                task_name="remote_task",
+                                status=remote_resp.status.value.upper(),
+                                worker_id=remote_resp.metadata.get("worker_id"),
+                                duration_ms=dur,
+                                result_preview=res_p,
+                                error_code=err_c,
+                                error_message=err_m,
+                                is_failure=remote_resp.status.value in ("failure", "error"),
+                            )
+                        ]
+                except Exception as exc:
+                    logger.debug("Failed querying remote task status: %s", exc)
+
+            format_tasks_output(matched, as_json=as_json, force_plain=force_plain)
+            return 0 if matched else 1
+        else:
+            all_displayed = snapshot.running_tasks + snapshot.recent_tasks
+            format_tasks_output(all_displayed, as_json=as_json, force_plain=force_plain)
+            return 0
+    finally:
+        try:
+            await node.leave_mesh()
+        except Exception:
+            pass
+        await node.stop()
+
+
+async def run_monitor_cmd(
+    host: str = "127.0.0.1",
+    port: int = 0,
+    peer_id: str | None = None,
+    seeds: list[str] | None = None,
+    refresh_rate: float = 1.0,
+    duration: float | None = None,
+    force_plain: bool = False,
+    verbose: bool = False,
+    security_config: Any | None = None,
+) -> int:
+    """Launch the interactive terminal monitoring dashboard (Rich or plain text)."""
+    from meshweaver.cli_dashboard import run_live_dashboard
+    from meshweaver.network import PeerNode
+    from meshweaver.status import setup_structured_logging
+
+    setup_structured_logging(verbose=verbose, as_json=False)
+
+    assigned_id = peer_id if peer_id else f"monitor-{int(time.time() * 1000) % 100000}"
+    node = PeerNode(host=host, port=port, peer_id=assigned_id, security_config=security_config)
+    node.enable_gossip()
+    node.enable_heartbeats()
+    await node.start()
+
+    try:
+        if seeds:
+            print(f"[MeshWeaver] Connecting to mesh via seeds: {seeds}...")
+            await node.join_mesh(seeds, timeout=5.0)
+            print("[MeshWeaver] Connected to mesh. Launching live dashboard...")
+
+        await run_live_dashboard(
+            node,
+            refresh_rate=refresh_rate,
+            duration=duration,
+            plain=force_plain,
+        )
+        return 0
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        return 0
+    finally:
+        print(f"\n[MeshWeaver] Stopping monitoring node '{node.peer_id}' gracefully...")
         try:
             await node.leave_mesh()
         except Exception:
@@ -458,9 +640,59 @@ def main(argv: list[str] | None = None) -> int:
     start_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local node/peer identifier")
     start_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses (e.g. 127.0.0.1:8001)")
     start_parser.add_argument("--duration", type=float, default=None, help="Optional duration in seconds to keep node running")
+    start_parser.add_argument("--dashboard", "--tui", "--monitor", dest="show_dashboard", action="store_true", help="Launch interactive Rich terminal monitoring dashboard")
+    start_parser.add_argument("--refresh-rate", type=float, default=1.0, help="Terminal dashboard refresh interval in seconds (default: 1.0)")
+    start_parser.add_argument("--plain", action="store_true", help="Force plain-text ASCII output without Rich formatting")
     start_parser.add_argument("--json", action="store_true", help="Output status events in JSON format")
     start_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
     add_security_arguments(start_parser)
+
+    peers_parser = subparsers.add_parser(
+        "peers",
+        aliases=["list-peers", "peer-list"],
+        help="Discover and list known mesh peers and health states",
+    )
+    peers_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses (e.g. 127.0.0.1:8001)")
+    peers_parser.add_argument("--host", default="127.0.0.1", help="Local network host interface")
+    peers_parser.add_argument("--port", type=int, default=0, help="Local network port to bind")
+    peers_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local peer identifier")
+    peers_parser.add_argument("--json", action="store_true", help="Output peer list in JSON format")
+    peers_parser.add_argument("--plain", action="store_true", help="Force plain-text table output")
+    peers_parser.add_argument("--timeout", type=float, default=3.0, help="Discovery timeout in seconds")
+    peers_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(peers_parser)
+
+    tasks_parser = subparsers.add_parser(
+        "tasks",
+        aliases=["task", "task-status"],
+        help="View active running tasks and recent execution results",
+    )
+    tasks_parser.add_argument("task_id", nargs="?", default=None, help="Optional specific task ID to query")
+    tasks_parser.add_argument("--task-id", dest="task_id_flag", default=None, help="Specific task ID to query")
+    tasks_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses")
+    tasks_parser.add_argument("--host", default="127.0.0.1", help="Local network host interface")
+    tasks_parser.add_argument("--port", type=int, default=0, help="Local network port to bind")
+    tasks_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local peer identifier")
+    tasks_parser.add_argument("--json", action="store_true", help="Output task information in JSON format")
+    tasks_parser.add_argument("--plain", action="store_true", help="Force plain-text table output")
+    tasks_parser.add_argument("--timeout", type=float, default=3.0, help="Query timeout in seconds")
+    tasks_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(tasks_parser)
+
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        aliases=["tui"],
+        help="Launch live interactive Rich terminal monitoring dashboard",
+    )
+    monitor_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses")
+    monitor_parser.add_argument("--host", default="127.0.0.1", help="Local network host interface (default: 127.0.0.1)")
+    monitor_parser.add_argument("--port", type=int, default=0, help="Local network port to bind (default: 0 for dynamic)")
+    monitor_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local node/peer identifier")
+    monitor_parser.add_argument("--refresh-rate", type=float, default=1.0, help="Dashboard refresh interval in seconds (default: 1.0)")
+    monitor_parser.add_argument("--duration", type=float, default=None, help="Optional duration in seconds before auto-closing")
+    monitor_parser.add_argument("--plain", action="store_true", help="Force plain-text ASCII output without Rich formatting")
+    monitor_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    add_security_arguments(monitor_parser)
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",
@@ -473,6 +705,9 @@ def main(argv: list[str] | None = None) -> int:
     dashboard_parser.add_argument("--api-port", type=int, default=8000, help="FastAPI dashboard port (default: 8000)")
     dashboard_parser.add_argument("--peer-id", dest="peer_id", default=None, help="Optional local node/peer identifier")
     dashboard_parser.add_argument("--seeds", default=None, help="Comma-separated bootstrap seed peer addresses")
+    dashboard_parser.add_argument("--tui", "--terminal", dest="use_tui", action="store_true", help="Launch terminal monitoring dashboard instead of web server")
+    dashboard_parser.add_argument("--refresh-rate", type=float, default=1.0, help="Dashboard refresh interval in seconds")
+    dashboard_parser.add_argument("--plain", action="store_true", help="Force plain-text output for terminal dashboard")
     dashboard_parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
     add_security_arguments(dashboard_parser)
 
@@ -561,16 +796,96 @@ def main(argv: list[str] | None = None) -> int:
                 seeds=seed_list,
                 duration=getattr(args, "duration", None),
                 verbose=args.verbose,
-                as_json=args.json,
+                as_json=getattr(args, "json", False),
+                security_config=sec_config,
+                show_dashboard=getattr(args, "show_dashboard", False),
+                refresh_rate=getattr(args, "refresh_rate", 1.0),
+                force_plain=getattr(args, "plain", False),
+            )
+        )
+
+    # 6. Peers subcommand
+    if getattr(args, "command", None) in ("peers", "list-peers", "peer-list"):
+        seed_list = None
+        if args.seeds:
+            seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        return asyncio.run(
+            run_peers_cmd(
+                seeds=seed_list,
+                host=args.host,
+                port=args.port,
+                peer_id=args.peer_id,
+                as_json=getattr(args, "json", False),
+                force_plain=getattr(args, "plain", False),
+                timeout=getattr(args, "timeout", 3.0),
+                verbose=args.verbose,
                 security_config=sec_config,
             )
         )
 
-    # 6. Dashboard / Web server subcommand
+    # 7. Tasks subcommand
+    if getattr(args, "command", None) in ("tasks", "task", "task-status"):
+        seed_list = None
+        if args.seeds:
+            seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        effective_task_id = getattr(args, "task_id_flag", None) or getattr(args, "task_id", None)
+
+        return asyncio.run(
+            run_tasks_cmd(
+                task_id=effective_task_id,
+                seeds=seed_list,
+                host=args.host,
+                port=args.port,
+                peer_id=args.peer_id,
+                as_json=getattr(args, "json", False),
+                force_plain=getattr(args, "plain", False),
+                timeout=getattr(args, "timeout", 3.0),
+                verbose=args.verbose,
+                security_config=sec_config,
+            )
+        )
+
+    # 8. Monitor / TUI subcommand
+    if getattr(args, "command", None) in ("monitor", "tui"):
+        seed_list = None
+        if args.seeds:
+            seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        return asyncio.run(
+            run_monitor_cmd(
+                host=args.host,
+                port=args.port,
+                peer_id=args.peer_id,
+                seeds=seed_list,
+                refresh_rate=getattr(args, "refresh_rate", 1.0),
+                duration=getattr(args, "duration", None),
+                force_plain=getattr(args, "plain", False),
+                verbose=args.verbose,
+                security_config=sec_config,
+            )
+        )
+
+    # 9. Dashboard / Web server subcommand
     if getattr(args, "command", None) in ("dashboard", "web", "ui"):
         seed_list = None
         if args.seeds:
             seed_list = [s.strip() for s in args.seeds.split(",") if s.strip()]
+
+        if getattr(args, "use_tui", False):
+            return asyncio.run(
+                run_monitor_cmd(
+                    host=args.host,
+                    port=args.port,
+                    peer_id=args.peer_id,
+                    seeds=seed_list,
+                    refresh_rate=getattr(args, "refresh_rate", 1.0),
+                    force_plain=getattr(args, "plain", False),
+                    verbose=args.verbose,
+                    security_config=sec_config,
+                )
+            )
 
         return asyncio.run(
             run_dashboard_cmd(
