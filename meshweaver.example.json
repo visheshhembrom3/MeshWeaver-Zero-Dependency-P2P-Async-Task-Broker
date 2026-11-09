@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MeshWeaver Node Configuration Example",
+  "description": "Example configuration file for MeshWeaver P2P node and broker",
+  "network": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "peer_id": "mesh-node-01",
+    "connection_timeout": 5.0
+  },
+  "seeds": [
+    "127.0.0.1:8001",
+    "127.0.0.1:8002"
+  ],
+  "heartbeat": {
+    "interval": 1.0,
+    "missed_threshold": 3
+  },
+  "gossip": {
+    "interval": 5.0
+  },
+  "security": {
+    "tls": {
+      "enabled": false,
+      "certfile": null,
+      "keyfile": null,
+      "cafile": null,
+      "require_client_cert": false,
+      "check_hostname": true
+    },
+    "shared_secret": null,
+    "auth_token": null,
+    "allowed_peers": []
+  },
+  "logging": {
+    "verbose": false,
+    "as_json": false
+  }
+}

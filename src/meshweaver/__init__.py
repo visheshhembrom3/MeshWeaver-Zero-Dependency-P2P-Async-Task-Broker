@@ -29,6 +29,7 @@ from meshweaver.dht import (
     xor_distance,
 )
 from meshweaver.exceptions import (
+    ConfigurationError,
     ConnectionClosedError,
     DHTError,
     DuplicatePeerError,
@@ -261,6 +262,7 @@ __all__: list[str] = [
     "MAX_TASK_NAME_LENGTH",
     "MAX_TASK_PAYLOAD_SIZE",
     "MAX_TASK_RESULT_SIZE",
+    "ConfigurationError",
     "ConnectionClosedError",
     "DHTError",
     "DashboardSnapshot",

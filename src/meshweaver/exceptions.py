@@ -182,3 +182,7 @@ class WorkerDisconnectedError(TaskError, ConnectionClosedError):
 class TaskRetryExhaustedError(TaskError):
     """Raised when task execution fails across all bounded retry attempts."""
 
+
+class ConfigurationError(MeshWeaverError):
+    """Raised when application configuration, environment settings, or CLI parameters fail validation."""
+

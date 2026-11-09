@@ -117,11 +117,22 @@ Activate the environment:
 source .venv/bin/activate
 ```
 
-Install development dependencies after the project defines them:
+Install development dependencies or install in editable mode:
 
 ```bash
 python -m pip install -U pip
-pip install -e ".[dev]"
+# Editable installation with all optional extras (CLI dashboard, security, metrics, dev tools):
+pip install -e ".[all]"
+
+# Or minimal editable installation:
+pip install -e .
+```
+
+Once installed, the CLI command `meshweaver` is directly available in your terminal (or via `python -m meshweaver`):
+
+```bash
+meshweaver --version
+meshweaver --help
 ```
 
 Run the test suite:
@@ -371,6 +382,90 @@ python -m meshweaver tasks --seeds 127.0.0.1:8001 --json
 #### 5. Graceful Node Shutdown
 
 All long-running CLI commands (`start`, `monitor`, `dashboard`) trap `SIGINT` (Ctrl+C) and `asyncio.CancelledError`, automatically notifying peers with departure notifications (`leave_mesh()`), cancelling active workers, and releasing bound TCP sockets cleanly.
+
+### Configuration Management & Precedence
+
+MeshWeaver provides unified configuration management supporting configuration files, environment variables, and CLI overrides with strict priority:
+
+$$\text{CLI Arguments} > \text{Environment Variables} > \text{Configuration File} > \text{Built-in Defaults}$$
+
+#### 1. Configuration File (`meshweaver.example.json`)
+You can pass a configuration file with `--config`:
+```bash
+meshweaver start --config meshweaver.example.json
+```
+
+Example configuration schema:
+```json
+{
+  "network": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "peer_id": "mesh-node-01",
+    "connection_timeout": 5.0
+  },
+  "seeds": [
+    "127.0.0.1:8001",
+    "127.0.0.1:8002"
+  ],
+  "heartbeat": {
+    "interval": 1.0,
+    "missed_threshold": 3
+  },
+  "gossip": {
+    "interval": 5.0
+  },
+  "security": {
+    "tls": {
+      "enabled": false,
+      "certfile": null,
+      "keyfile": null,
+      "cafile": null,
+      "require_client_cert": false,
+      "check_hostname": true
+    },
+    "shared_secret": null,
+    "auth_token": null,
+    "allowed_peers": []
+  },
+  "logging": {
+    "verbose": false,
+    "as_json": false
+  }
+}
+```
+
+#### 2. Environment Variables (`MESHWEAVER_*`)
+All core node parameters can be set via environment variables prefixed with `MESHWEAVER_`:
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `MESHWEAVER_CONFIG` | Path to JSON configuration file | None |
+| `MESHWEAVER_HOST` | Local network host interface | `127.0.0.1` |
+| `MESHWEAVER_PORT` | Local network port to bind | `0` (dynamic) |
+| `MESHWEAVER_PEER_ID` | Node peer identifier | Generated |
+| `MESHWEAVER_SEEDS` | Comma-separated seed endpoints (`host:port`) | None |
+| `MESHWEAVER_TIMEOUT` | Network connection/discovery timeout in seconds | `5.0` |
+| `MESHWEAVER_HEARTBEAT_INTERVAL` | Heartbeat pulse interval in seconds | `1.0` |
+| `MESHWEAVER_MISSED_THRESHOLD` | Missed heartbeats before peer failure | `3` |
+| `MESHWEAVER_GOSSIP_INTERVAL` | Gossip metrics dissemination interval in seconds | `5.0` |
+| `MESHWEAVER_VERBOSE` | Enable verbose debug logging (`1`/`true`) | `false` |
+| `MESHWEAVER_JSON` | Enable structured JSON output (`1`/`true`) | `false` |
+| `MESHWEAVER_PLAIN` | Force plain-text ASCII terminal dashboard | `false` |
+| `MESHWEAVER_TLS_ENABLED` | Enable TLS transport encryption (`1`/`true`) | `false` |
+| `MESHWEAVER_TLS_CERT` | Path to TLS certificate PEM file | None |
+| `MESHWEAVER_TLS_KEY` | Path to TLS private key PEM file | None |
+| `MESHWEAVER_TLS_CA` | Path to TLS CA certificate PEM file | None |
+| `MESHWEAVER_REQUIRE_CLIENT_CERT`| Require peer client certificate (mTLS) | `false` |
+| `MESHWEAVER_SHARED_SECRET` | Pre-shared HMAC secret for message integrity | None |
+| `MESHWEAVER_AUTH_TOKEN` | Pre-shared authentication bearer token | None |
+| `MESHWEAVER_ALLOWED_PEERS` | Comma-separated peer ID allowlist | None |
+
+#### 3. Clear Startup Errors
+MeshWeaver strictly validates configuration inputs (ports within `0..65535`, positive timeouts, valid seed `host:port` pairs, existing certificate paths, and valid JSON structure). In case of invalid inputs, a human-readable diagnostic error is displayed without raw Python tracebacks:
+```text
+[MeshWeaver Configuration Error] Invalid port: 99999. Must be an integer between 0 and 65535
+```
 
 ### Multi-Node Cluster Startup and Remote Task Execution
 
@@ -750,12 +845,13 @@ Guards against memory exhaustion (DoS):
 2. **At-Least-Once Delivery**: Distributed task failover upon worker disconnection provides at-least-once execution semantics; tasks may execute more than once if a worker dropped connection mid-computation. MeshWeaver explicitly does not claim exactly-once execution.
 3. **Authenticated Transport**: Peer communication supports TLS 1.2+ encryption, mutual certificate validation (mTLS), HMAC-SHA256 message signing, replay protection, and bearer tokens. Cleartext TCP remains available for isolated local development.
 
-### Week 4 — Security, CLI, and Dashboard
-- Add authentication and secure transport where practical.
-- Review message validation and execution boundaries.
-- Build a CLI for node management and task submission.
-- Add a web dashboard for peer/task monitoring.
-- Finalize tests, documentation, and a reproducible demo.
+### Week 4 — Security, Monitoring, and Release Readiness
+
+- [x] **Peer security and authentication (Commit 16)**: Implemented configurable TLS with Python's standard `ssl` module, mutual TLS certificate validation, pre-shared bearer token authentication (`secrets.compare_digest`), peer ID allowlists, HMAC-SHA256 message signing/integrity, replay window protection, and 4 MiB frame / 1 MiB payload DoS bounds.
+- [x] **Rich-based CLI dashboard and monitoring commands (Commit 17)**: Implemented interactive terminal monitoring dashboard with Rich, CPU/RAM utilization and peer health reports, active and completed task inspection, plain-text ASCII fallback, and CLI commands (`start`, `peers`, `tasks`, `monitor`, `submit`).
+- [x] **Packaging, configuration, and CLI installation (Commit 18)**: Finalized `pyproject.toml` with metadata, installable CLI entrypoint (`meshweaver`), optional extras (`metrics`, `security`, `cli`, `all`), linters/formatters (`ruff`, `mypy`), and pytest settings. Added `meshweaver.example.json`, environment variable resolution (`MESHWEAVER_*`), strict priority hierarchy (CLI > ENV > File > Defaults), and clean startup error reporting.
+- [ ] **Web dashboard and REST/WebSocket API**: Peer and task visualization interface.
+- [ ] **Release readiness and final verification**: Finalize tests, documentation, and a reproducible demo.
 
 ## Development Principles
 
