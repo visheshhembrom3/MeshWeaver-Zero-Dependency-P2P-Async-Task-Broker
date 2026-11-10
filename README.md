@@ -1,401 +1,456 @@
 # MeshWeaver: Zero-Dependency P2P Async Task Broker
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![Architecture](https://img.shields.io/badge/Architecture-Peer--to--Peer-purple.svg)](#architecture)
-[![Status](https://img.shields.io/badge/Status-In%20Development-orange.svg)](#roadmap)
+[![Architecture](https://img.shields.io/badge/Architecture-Peer--to--Peer-purple.svg)](#architecture-overview)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Complete%20(Weeks%201--4)-brightgreen.svg)](#four-week-implementation-roadmap)
 
-MeshWeaver is an educational Python project exploring decentralized task distribution across peer nodes. It aims to let nodes discover one another, exchange workload information, route tasks to suitable workers, and recover from peer failures without requiring a central task broker.
+MeshWeaver is an educational, zero-dependency peer-to-peer asynchronous task broker implemented in Python 3.11+. It demonstrates decentralized peer discovery, workload telemetry propagation, load-aware task routing, and resilient fault recovery without requiring central coordination services such as Redis, RabbitMQ, or Celery.
 
-> **Project status:** In development. Features described as planned or in progress should not be considered implemented until they are built and tested in this repository.
+---
+
+## Table of Contents
+
+1. [Why MeshWeaver?](#why-meshweaver)
+2. [Core Design Principles](#core-design-principles)
+3. [Architecture Overview](#architecture-overview)
+4. [Supported Features](#supported-features)
+5. [Module Breakdown](#module-breakdown)
+6. [Installation & Dependencies](#installation--dependencies)
+7. [Quick-Start Guide](#quick-start-guide)
+8. [Multi-Node Local Demonstrations](#multi-node-local-demonstrations)
+9. [CLI Usage Reference](#cli-usage-reference)
+10. [Configuration Management & Environment Variables](#configuration-management--environment-variables)
+11. [Interactive Dashboards & Web UI](#interactive-dashboards--web-ui)
+12. [Testing Guide](#testing-guide)
+13. [Troubleshooting](#troubleshooting)
+14. [Security Boundaries & Threat Model](#security-boundaries--threat-model)
+15. [Current Limitations](#current-limitations)
+16. [Four-Week Implementation Roadmap](#four-week-implementation-roadmap)
+17. [Contributing & License](#contributing--license)
+
+---
 
 ## Why MeshWeaver?
 
-Traditional distributed task queues commonly rely on central services such as Redis or RabbitMQ. Those tools are mature and useful, but they require additional infrastructure and introduce a central coordination dependency.
+Traditional distributed task queues (e.g., Celery with Redis or RabbitMQ) rely on a central broker to hold task queues, coordinate worker registries, and monitor heartbeats. While mature, centralized architectures introduce:
+- **Single Points of Failure (SPOF)**: A broker crash halts all task distribution across the cluster.
+- **Operational Infrastructure Overhead**: Running, configuring, securing, and scaling standalone broker clusters.
+- **Network Inefficiencies**: All task requests and worker heartbeats must funnel through a central choke point, even between adjacent edge devices.
 
-MeshWeaver explores a peer-to-peer alternative for learning and experimentation, especially in edge-computing scenarios where devices may have limited resources or intermittent connectivity.
+MeshWeaver explores a peer-to-peer alternative designed for edge computing, local ad-hoc clusters, and educational exploration. Nodes self-organize, discover neighboring workers, continuously exchange workload telemetry via epidemic gossip, dynamically route tasks to the least-loaded healthy peers, and automatically fail over when peers drop off the network.
 
-## Goals
+---
 
-- Use Python's `asyncio` for non-blocking peer communication.
-- Discover peers through a Kademlia-style Distributed Hash Table (DHT).
-- Exchange CPU and memory load reports between nodes.
-- Route tasks to an appropriate available peer.
-- Serialize and validate task requests safely.
-- Detect lost peers using heartbeats and handle failed tasks.
-- Offer a CLI and a web dashboard for observing network and task state.
-- Keep the core implementation modular, testable, and documented.
+## Core Design Principles
 
-## Planned Architecture
+1. **Zero External Runtime Dependencies**: MeshWeaver's core peer networking, Kademlia DHT, gossip engine, task scheduler, and security layers operate entirely on the Python Standard Library (`asyncio`, `socket`, `ssl`, `hmac`, `hashlib`, `json`, `dataclasses`, `logging`).
+2. **Strict Safety & Execution Boundaries**: Arbitrary remote code execution (RCE) via `pickle`, `eval`, `exec`, dynamic imports, or bytecode compilation is strictly prohibited. Only functions explicitly registered in a node's local `TaskRegistry` may execute.
+3. **Deterministic Mathematical Foundations**: Peer topology and addressing leverage a 160-bit SHA-1 keyspace and the bitwise XOR distance metric ($d(x, y) = x \oplus y$), guaranteeing triangle inequality, unidirectionality, and loop-free routing.
+4. **Resilient Failure Tolerance**: Network timeouts, crashed workers, and stale records are handled gracefully through active heartbeat monitoring, fast sub-millisecond socket-drop detection, and bounded candidate failover retry under at-least-once execution semantics.
+5. **Decoupled Asynchronous Core**: Networking, discovery, gossip, execution, and scheduling coroutines operate concurrently over structured interfaces without blocking the asyncio event loop.
 
-```text
-                 Mesh of peer nodes
-        ┌────────────┐       ┌────────────┐
-        │   Node A   │◄─────►│   Node B   │
-        │ Discovery  │       │ Discovery  │
-        │ Task API   │       │ Task API   │
-        │ Load report│       │ Load report│
-        └─────┬──────┘       └─────┬──────┘
-              │                    │
-              └─────────┬──────────┘
-                        ▼
-             Task routing and execution
-                        │
-               CLI / Web Dashboard
+---
+
+## Architecture Overview
+
+MeshWeaver employs a modular seven-layer architecture. Each layer communicates through typed data structures and asynchronous queues.
+
+```mermaid
+graph TD
+    subgraph UI ["User Interfaces & Management"]
+        CLI["CLI Commands (start, status, submit, peers, tasks, monitor)"]
+        TUI["Rich Terminal Dashboard / Plain-text ASCII Fallback"]
+        WebUI["Web Dashboard (React + TypeScript + Vite SPA)"]
+    end
+
+    subgraph API ["Control & Telemetry Interface"]
+        StatusAPI["NodeStatusAPI (Snapshots, Health Metrics, Event Log)"]
+        FastAPIAdapter["FastAPI Adapter (REST Endpoints & WebSocket /ws/events)"]
+        ConfigMgr["Configuration Manager (CLI > ENV > JSON File > Defaults)"]
+    end
+
+    subgraph Core ["MeshWeaver Peer Core (asyncio)"]
+        PeerNode["PeerNode (Lifecycle Coordinator)"]
+        SecLayer["Security Layer (TLS, mTLS, HMAC-SHA256, Replay Window)"]
+        Heartbeat["HeartbeatMonitor (Probes, Health State Machine)"]
+        Scheduler["TaskScheduler (Load-Aware Routing & Candidate Selection)"]
+        Router["TaskRouter (Failover Retries, At-Least-Once Semantics)"]
+    end
+
+    subgraph Subsystems ["Decentralized Subsystems"]
+        Registry["PeerRegistry (Endpoint Directory, TTL Pruning)"]
+        DHT["DHT Routing Table (160-bit SHA-1, XOR Metric, k-Buckets)"]
+        Gossip["GossipEngine (Workload Telemetry, CPU/RAM, Anti-Amplification)"]
+        ExecEngine["TaskExecutionEngine (Async Queue, Worker Pool, Semaphore)"]
+        TaskReg["TaskRegistry (Strict Function Allowlist, Safe Schemas)"]
+    end
+
+    subgraph Network ["Wire Protocol & Transport"]
+        Framing["Binary Protocol Framing (4-byte BE Length + JSON Payload)"]
+        Transport["Asyncio TCP Streams (Encrypted TLS or Plaintext)"]
+    end
+
+    CLI --> ConfigMgr
+    CLI --> PeerNode
+    TUI --> StatusAPI
+    WebUI --> FastAPIAdapter
+    FastAPIAdapter --> PeerNode
+    FastAPIAdapter --> StatusAPI
+
+    PeerNode --> SecLayer
+    PeerNode --> Heartbeat
+    PeerNode --> Scheduler
+    PeerNode --> Router
+    PeerNode --> StatusAPI
+
+    Scheduler --> Gossip
+    Scheduler --> Registry
+    Router --> Transport
+    PeerNode --> Registry
+    PeerNode --> DHT
+    PeerNode --> Gossip
+    PeerNode --> ExecEngine
+    ExecEngine --> TaskReg
+
+    SecLayer --> Framing
+    Framing --> Transport
 ```
 
-The diagram is conceptual. The actual network topology and implementation will evolve as features are completed. For a comprehensive technical specification of subsystems, binary framing, Kademlia DHT, gossip engine, and load-aware routing mechanics, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For complete technical specifications, binary wire framing formats, Kademlia iterative lookup pseudocode, and mathematical proofs, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Main Components
+---
 
-| Component | Responsibility |
-|---|---|
-| Async networking | Non-blocking communication between peers using Python `asyncio` TCP primitives |
-| Peer registry | Track known peers by node ID and validated network endpoint with state transitions and TTL expiration |
-| Peer discovery | Find and maintain knowledge of other nodes using a DHT-inspired approach with 160-bit identifiers and XOR distance metric |
-| Workload gossip | Share approximate CPU and memory utilization with neighboring peers |
-| Task serialization | Define a structured, validated format for task requests and results |
-| Task execution engine | Local asyncio-based task queue, worker pool, concurrency control, lifecycle state management (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED), exception handling, and cancellation |
-| Task routing | Select a suitable peer based on availability and reported load via `TaskRouter` and `LoadAwareRoutingStrategy` |
-| Fault monitoring | Use heartbeats, timeouts, and automatic candidate failover to detect and recover from unresponsive peers |
-| CLI | Start nodes, submit tasks, and inspect status |
-| Web dashboard | Visualize peers, task states, and network activity |
+## Supported Features
 
-### Kademlia Protocol Alignment and Mechanisms
-
-MeshWeaver implements a modular DHT-inspired peer discovery layer that serves as the foundation for evolving toward the full Kademlia protocol. The table below documents exactly which Kademlia mechanisms are currently implemented and which are planned for future milestones:
-
-| Kademlia Mechanism | Status | Details |
+| Feature Subsystem | Status | Highlights |
 |---|---|---|
-| **160-bit Keyspace** | **Implemented** | Fixed-length 160-bit `NodeID` (20 bytes) compatible with SHA-1 hashing of node identifiers and endpoints. |
-| **XOR Distance Metric** | **Implemented** | Deterministic bitwise metric $d(x, y) = x \oplus y$ satisfying mathematical guarantees (identity, symmetry, strict positivity, triangle inequality, unidirectionality). |
-| **Closest Peers Selection** | **Implemented** | Deterministic local selection of the $k$ closest known peers ordered strictly by XOR distance (`find_closest_peers` and `PeerRegistry.find_closest_peers`). |
-| **Iterative Peer Lookup** | **Implemented** | Multi-round asynchronous iterative search converging toward a target key with concurrency control ($\alpha$) via `IterativeLookup` and `iterative_peer_lookup`. |
-| **Duplicate Suppression** | **Implemented** | Tracking of candidate, queried, and unresponsive node IDs to ensure no peer is queried twice and cyclic graphs terminate cleanly. |
-| **Bounded Queries** | **Implemented** | Hard bounds on total queries (`max_queries`), iterative rounds (`max_rounds`), and concurrency ($\alpha$) to prevent runaway query storms. |
-| **Resilient Timeouts** | **Implemented** | Per-query timeout (`query_timeout`) isolating slow or crashed peers, plus overall lookup timeout (`overall_timeout`). |
-| **Discovery Wire Protocol** | **Implemented** | `FIND_NODE` and `NODES_FOUND` message schemas and asynchronous handlers integrated into `PeerNode`. |
-| **$k$-Bucket Routing Table** | **Implemented** | 160-bucket `RoutingTable` indexed by common prefix length (`cpl`), bounded by capacity $k$, with LRU contact ordering, replacement caching, and XOR distance closest-peer selection (`KBucket`, `RoutingTable`). |
-| **Ping-Before-Evict Policy** | Educational / Planned | Educational implementation uses deterministic LRU ordering with replacement caching; active network ping-before-evict RPC hook documented for future background maintenance. |
-| **Distributed Key-Value RPCs**| Planned | `STORE` and `FIND_VALUE` RPCs for decentralized content and task storage. |
-| **Bucket Refresh Timers** | Planned | Automatic refresh lookups for stale buckets and periodic key republishing. |
+| **Async Networking** | Production-Ready | Non-blocking `asyncio` TCP client/server, connection pooling, handshake negotiation, correlated request-response matching. |
+| **Binary Protocol Framing** | Production-Ready | Length-prefixed wire framing (4-byte big-endian length + JSON envelope), 10 MiB frame limit, DoS payload protection. |
+| **Dynamic Peer Registry** | Production-Ready | Local endpoint registry tracking peers by unique `NodeID`, health states (`ACTIVE`, `STALE`, `EXPIRED`), collision handling, and TTL expiration. |
+| **Kademlia-Inspired DHT** | Production-Ready | 160-bit SHA-1 keyspace, bitwise XOR distance metric, 160-bucket `RoutingTable` with LRU eviction and replacement caching, bounded iterative lookups with timeouts. |
+| **Workload Telemetry (Gossip)** | Production-Ready | Epidemic gossip protocol disseminating CPU percent, memory percent, active task count, health status, monotonic timestamps, fanout bounds, and hop counters. |
+| **Local Task Execution Engine** | Production-Ready | Standalone `TaskExecutionEngine` with `asyncio.Queue`, worker pool concurrency control (`max_concurrency`), strict lifecycle states (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`), task cancellation. |
+| **Standalone Task Worker** | Production-Ready | `TaskWorker` supporting asynchronous and synchronous tasks in threadpools, execution timeout bounds, structured exception handling (`TaskErrorInfo`), and safe error encapsulation. |
+| **Load-Aware Task Scheduling** | Production-Ready | Composite load scoring evaluating active tasks (weight 10.0), CPU% (0.5), memory% (0.5), and health penalties. Deterministic XOR tie-breaking and explainability (`explain()`). |
+| **Fault Recovery & Failover** | Production-Ready | Active heartbeat probes (`HeartbeatMonitor`), health state transitions (`HEALTHY` -> `DEGRADED` -> `UNHEALTHY`), instant TCP disconnect detection, bounded retries under at-least-once execution semantics. |
+| **Peer Security & Auth** | Production-Ready | TLS 1.2+ encryption, mutual TLS (mTLS), HMAC-SHA256 message signing/integrity, bearer token authentication, peer allowlists, sliding replay window (60s), DoS size bounds. |
+| **Terminal Dashboard (TUI)** | Production-Ready | Live interactive Rich terminal dashboard with peer health tables, CPU/RAM bars, active tasks, failure tracking, and automatic clean plain-text ASCII fallback. |
+| **Unified Configuration** | Production-Ready | Multi-layer resolution: CLI Arguments > Environment Variables (`MESHWEAVER_*`) > Configuration File (`meshweaver.example.json`) > Defaults, with human-readable diagnostic error reporting. |
+| **Web Dashboard & API** | Production-Ready | FastAPI REST API, live WebSocket telemetry stream (`/ws/events`), React 18 + TypeScript + Vite SPA with light theme and interactive network topology graph. |
 
+---
 
-## Technology Stack
+## Module Breakdown
 
-- **Language:** Python 3.11+
-- **Asynchronous runtime:** `asyncio`
-- **Networking:** Python socket APIs; TCP/UDP as appropriate to the implemented protocol
-- **Peer discovery:** Kademlia-style DHT concepts
-- **Serialization:** Start with validated JSON-compatible task messages; only support executable code objects if a carefully restricted, trusted execution model is designed
-- **Testing:** `pytest` and `pytest-asyncio` (planned)
-- **Interface:** CLI first; web dashboard added in a later development phase
+All source code resides under `src/meshweaver/`. Every module has targeted unit and integration tests under `tests/`.
 
-## Security Notes
+| Module | Primary Responsibilities | Key Classes / Functions |
+|---|---|---|
+| [`protocol.py`](src/meshweaver/protocol.py) | Wire message framing, length-prefix serialization, frame size enforcement, protocol versions. | `Message`, `MessageType`, `read_message`, `write_message`, `MAX_FRAME_SIZE` |
+| [`network.py`](src/meshweaver/network.py) | Async TCP stream handling, dynamic port binding, handshake negotiation, request routing, mesh lifecycle. | `PeerNode`, `PeerConnection`, `join_mesh`, `leave_mesh`, `submit_task` |
+| [`peers.py`](src/meshweaver/peers.py) | Peer identification, network endpoint representations, state machine, registry TTL pruning. | `PeerRecord`, `PeerEndpoint`, `PeerRegistry`, `PeerState` |
+| [`dht.py`](src/meshweaver/dht.py) | 160-bit keyspace, bitwise XOR distance calculation, $k$-bucket routing table, iterative lookup engine. | `NodeID`, `xor_distance`, `KBucket`, `RoutingTable`, `IterativeLookup` |
+| [`gossip.py`](src/meshweaver/gossip.py) | Epidemic workload dissemination, system telemetry collection, monotonic freshness, anti-amplification. | `GossipEngine`, `GossipStore`, `ResourceCollector`, `NodeResourceReport` |
+| [`execution.py`](src/meshweaver/execution.py) | Local asynchronous task engine, worker pool concurrency control, lifecycle states, cancellation. | `TaskExecutionEngine`, `TaskRecord`, `TaskState` |
+| [`worker.py`](src/meshweaver/worker.py) | Independent task worker, envelope validation, execution timeout boundaries, threadpool offloading. | `TaskWorker`, `TaskEnvelope`, `TaskResult`, `TaskLifecycleState` |
+| [`tasks.py`](src/meshweaver/tasks.py) | Task request/response schemas, task function registry, strict allowlisting, error encapsulation. | `TaskRequest`, `TaskResponse`, `TaskRegistry`, `TaskErrorInfo`, `TaskStatus` |
+| [`routing.py`](src/meshweaver/routing.py) | Load-aware task routing, candidate peer ranking, automatic failover retries. | `TaskRouter`, `LoadAwareRoutingStrategy`, `RoutingDecision` |
+| [`scheduler.py`](src/meshweaver/scheduler.py) | Decentralized load-aware scheduling, composite score ranking, health penalty integration, explainability. | `TaskScheduler`, `LoadAwareScheduler`, `SchedulerConfig`, `SchedulingDecision` |
+| [`heartbeat.py`](src/meshweaver/heartbeat.py) | Active heartbeat probe loop, probe timeouts, latency tracking (RTT), peer health state machine. | `HeartbeatMonitor`, `HeartbeatConfig`, `HealthStatus` |
+| [`security.py`](src/meshweaver/security.py) | Transport encryption (TLS/mTLS), HMAC-SHA256 message signing, replay cache, bearer token auth. | `SecurityConfig`, `TLSConfig`, `ReplayCache`, `build_ssl_context`, `verify_signature` |
+| [`status.py`](src/meshweaver/status.py) | Observability service, health snapshots, structured logging formatters. | `NodeStatusAPI`, `NodeStatusSnapshot`, `PeerStatus`, `setup_structured_logging` |
+| [`cli_dashboard.py`](src/meshweaver/cli_dashboard.py) | Rich terminal monitoring dashboard, snapshot generation, table formatters, plain-text ASCII fallback. | `run_live_dashboard`, `render_rich_dashboard`, `render_plain_text_dashboard` |
+| [`config.py`](src/meshweaver/config.py) | Unified configuration resolution, environment-variable parsing, JSON file loading, semantic validation. | `NodeConfig`, `resolve_node_config`, `load_env_config`, `load_config_file` |
+| [`exceptions.py`](src/meshweaver/exceptions.py) | Domain exception hierarchy rooted in `MeshWeaverError`. | `ConfigurationError`, `NetworkError`, `SecurityError`, `TaskError` |
+| [`__main__.py`](src/meshweaver/__main__.py) | CLI argument parsing and command dispatch (`start`, `status`, `submit`, `peers`, `tasks`, `monitor`, `dashboard`, `demo`). | `main` |
+| [`__init__.py`](src/meshweaver/__init__.py) | Public package exports, version definition (`__version__ = "0.1.0"`). | All primary classes and types |
 
-MeshWeaver is a learning project, not a production-ready remote code execution platform. Never execute arbitrary code received from an untrusted peer. Python `pickle` can execute code during deserialization and must not be used with untrusted network input. Prefer explicit task types, validated JSON payloads, authentication, authorization, timeouts, resource limits, and encrypted transport before considering real-world deployment.
+---
 
-## Getting Started
+## Installation & Dependencies
 
-Requirements: Python 3.11 or later and Git.
+MeshWeaver requires **Python 3.11** or later.
+
+### 1. Create a Clean Virtual Environment
 
 ```bash
-git clone https://github.com/<YOUR-GITHUB-USERNAME>/meshweaver-p2p-async-task-broker.git
+# Clone the repository
+git clone https://github.com/vishesh-hembrom/meshweaver-p2p-async-task-broker.git
 cd meshweaver-p2p-async-task-broker
 
+# Create virtual environment
 python -m venv .venv
 ```
 
 Activate the environment:
 
-**Windows PowerShell**
+**Windows PowerShell:**
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
 
-**macOS/Linux**
+**macOS / Linux:**
 ```bash
 source .venv/bin/activate
 ```
 
-Install development dependencies or install in editable mode:
+### 2. Dependency Philosophy & Optional Extras
+
+MeshWeaver has **zero required external runtime dependencies**. The core package operates entirely within the Python Standard Library. Optional extras provide enhanced capabilities:
+
+| Extra | Dependencies | Purpose | Fallback when Omitted |
+|---|---|---|---|
+| *(none / core)* | *(none)* | Core P2P networking, DHT discovery, task routing, security, and execution. | Standard library (`socket`, `ssl`, `hmac`, `asyncio`). |
+| `cli` | `rich>=13.0.0` | Live interactive terminal dashboard widgets and colored status displays. | Clean plain-text ASCII table output. |
+| `security` | `cryptography>=42.0.0` | Advanced X.509 certificate generation, inspection, and verification. | Standard library `ssl` and `hmac` modules. |
+| `metrics` | `psutil>=5.9.0` | High-fidelity hardware resource monitoring (per-core CPU, memory swap). | Native OS primitives (`ctypes` on Windows, `/proc` on Linux). |
+| `dev` | `pytest>=8.0.0`, `pytest-asyncio>=0.23.0`, `ruff>=0.4.0`, `mypy>=1.10.0` | Testing, linting, and static type checking. | N/A |
+| `all` | `rich`, `cryptography`, `psutil` | Installs all optional runtime extras for production and CLI monitoring. | N/A |
+
+### 3. Editable Installation
 
 ```bash
+# Upgrade pip
 python -m pip install -U pip
-# Editable installation with all optional extras (CLI dashboard, security, metrics, dev tools):
+
+# Full installation with all runtime extras:
 pip install -e ".[all]"
 
-# Or minimal editable installation:
+# Or minimal zero-dependency installation:
 pip install -e .
 ```
 
-Once installed, the CLI command `meshweaver` is directly available in your terminal (or via `python -m meshweaver`):
-
+After installation, the `meshweaver` command-line executable is registered and ready:
 ```bash
 meshweaver --version
 meshweaver --help
 ```
 
-Run the test suite:
+*(Note: You can also invoke the entry point directly via `python -m meshweaver`.)*
+
+---
+
+## Quick-Start Guide
+
+Get up and running with MeshWeaver in under 60 seconds:
 
 ```bash
-pytest
-```
-
-### Running the Local Task Execution Engine Demonstration
-
-Demonstrate the standalone asynchronous task execution engine with an `asyncio` pending queue, configurable worker pool concurrency (`max_concurrency`), task lifecycle state transitions (`PENDING` -> `RUNNING` -> `COMPLETED`/`FAILED`/`CANCELLED`), exception boundaries, duration tracking, and orderly shutdown:
-
-```bash
-# Run local asynchronous task execution demonstration:
-python examples/local_task_execution.py
-
-# Run with custom worker concurrency:
-python examples/local_task_execution.py --concurrency 4
-```
-
-### Local Asynchronous Task Execution Example
-
-MeshWeaver's `TaskExecutionEngine` is decoupled from the networking layer, allowing developers to execute and test tasks locally using Python's standard `asyncio`:
-
-```python
-import asyncio
-from meshweaver import TaskExecutionEngine, TaskState
-
-async def main() -> None:
-    # 1. Initialize engine with worker concurrency limit
-    async with TaskExecutionEngine(max_concurrency=2) as engine:
-        # 2. Register custom synchronous or asynchronous tasks
-        @engine.register("multiply")
-        async def multiply(a: int, b: int) -> int:
-            await asyncio.sleep(0.01)
-            return a * b
-
-        # 3. Submit built-in example tasks and custom tasks
-        task_add = await engine.submit("add", 15, 27)
-        task_rev = await engine.submit("reverse_string", "MeshWeaver")
-        task_mult = await engine.submit("multiply", 6, 7)
-
-        # 4. Await task completion
-        await asyncio.gather(task_add.wait(), task_rev.wait(), task_mult.wait())
-
-        # 5. Inspect results, states, and duration
-        print(f"Task ID: {task_add.task_id} -> Result: {task_add.result} [{task_add.state}] (took {task_add.duration:.4f}s)")
-        print(f"Task ID: {task_rev.task_id} -> Result: {task_rev.result} [{task_rev.state}]")
-        print(f"Task ID: {task_mult.task_id} -> Result: {task_mult.result} [{task_mult.state}]")
-
-asyncio.run(main())
-```
-
-### Running the Asynchronous Task Worker Demonstration
-
-Demonstrate the standalone `TaskWorker` engine accepting validated `TaskEnvelope` envelopes, managing lifecycle states (`pending` -> `running` -> `succeeded` / `failed`), enforcing execution timeouts, isolating exceptions, strictly preventing arbitrary remote code execution, and managing concurrency limits:
-
-```bash
-# Run task worker execution demonstration:
-python examples/task_worker_execution.py
-
-# Run with custom worker concurrency limit:
-python examples/task_worker_execution.py --concurrency 4
-```
-
-### Running the Two-Peer Demonstration
-
-Demonstrate two local MeshWeaver nodes binding dynamic ports, completing an asynchronous handshake, exchanging a ping/pong message, and executing validated task requests (`add`, `reverse_string`) with orderly shutdown:
-
-```bash
-python examples/two_peers.py
-```
-
-Or run via the package CLI entry point:
-
-```bash
+# 1. Run the built-in two-peer handshake and task execution demonstration
 python -m meshweaver --demo
+
+# 2. Start a persistent local peer node on port 8001
+meshweaver start --port 8001 --peer-id quickstart-seed
+
+# 3. In another terminal, inspect the node status
+meshweaver status --seeds 127.0.0.1:8001
+
+# 4. Submit an allowlisted task to the running node
+meshweaver submit add 15 27 --seeds 127.0.0.1:8001
+
+# 5. Launch the live terminal monitoring dashboard
+meshweaver monitor --seeds 127.0.0.1:8001
 ```
 
-Use `-v` or `--verbose` for detailed network framing and event logs:
+---
+
+## Multi-Node Local Demonstrations
+
+MeshWeaver includes self-contained example scripts in `examples/` demonstrating decentralized multi-node workflows:
+
+### Automated Demonstration Scripts
 
 ```bash
-python examples/two_peers.py --verbose
-```
-
-### Running the Multi-Node Discovery and Gossip Demonstration
-
-Demonstrate three or more local MeshWeaver nodes binding dynamic loopback ports, completing bootstrap discovery via seed nodes, executing iterative DHT peer lookups, exchanging workload metrics via gossip, reporting unified node status, and executing graceful shutdown:
-
-```bash
-# Run multi-node mesh demonstration (Bootstrap + Worker 1 + Worker 2):
+# 1. Multi-Node Discovery & Gossip (Bootstrap + 2 Workers)
+# Demonstrates dynamic port binding, bootstrap discovery, DHT iterative lookup,
+# gossip workload exchange, status snapshots, and graceful departure.
 python examples/multi_node.py
 
-# Run with custom JSON configuration:
-python examples/multi_node.py --config examples/mesh_config.json
-
-# Output structured JSON status snapshot:
-python examples/multi_node.py --json
-
-# Enable verbose debug logs:
-python examples/multi_node.py --verbose
-
-# Run via package CLI entrypoint:
-python -m meshweaver --multi-node
-python -m meshweaver demo --multi-node
-```
-
-### Example Mesh Configuration
-
-The multi-node cluster can be configured via a JSON configuration file (e.g. `examples/mesh_config.json`):
-
-```json
-{
-  "network": {
-    "host": "127.0.0.1",
-    "connection_timeout": 3.0,
-    "request_timeout": 3.0
-  },
-  "gossip": {
-    "interval": 0.2,
-    "fanout": 2,
-    "stale_threshold": 30.0,
-    "ttl": 60.0,
-    "max_hops": 3
-  },
-  "dht": {
-    "alpha": 3,
-    "k": 20,
-    "query_timeout": 2.0,
-    "overall_timeout": 4.0
-  },
-  "nodes": [
-    { "peer_id": "bootstrap-node", "port": 0, "role": "bootstrap_seed", "is_seed": true },
-    { "peer_id": "worker-node-1", "port": 0, "role": "compute_worker", "is_seed": false },
-    { "peer_id": "worker-node-2", "port": 0, "role": "compute_worker", "is_seed": false }
-  ]
-}
-```
-
-### Inspecting Node and Peer Status
-
-Inspect the local node and mesh peers directly from the CLI:
-
-```bash
-# Print formatted ASCII table dashboard:
-python -m meshweaver status
-
-# Emit clean JSON output:
-python -m meshweaver status --json
-
-# Query mesh status via bootstrap seed nodes:
-python -m meshweaver status --seeds 127.0.0.1:8001
-```
-
-### Running the End-to-End Remote Task Execution Demonstration
-
-Demonstrate multi-node task distribution, load-aware worker routing, strict execution boundaries, worker failover resilience, and graceful teardown:
-
-```bash
-# Run the remote task execution demonstration:
+# 2. End-to-End Remote Task Execution & Worker Failover
+# Demonstrates 4-node cluster (Seed + 2 Compute Workers + Client), load-aware routing,
+# duplicate submission deduplication, request timeouts, and automatic failover retry upon worker crash.
 python examples/remote_tasks.py
 
-# Run via package CLI entrypoint:
-python -m meshweaver --tasks
-python -m meshweaver demo --tasks
+# 3. Load-Aware Scheduling Evaluation
+# Demonstrates composite scoring (active tasks, CPU%, RAM%, health penalty),
+# deterministic XOR tie-breaking, and rejection of stale/unhealthy nodes.
+python examples/load_aware_scheduling.py
 
-# Emit structured JSON demonstration results:
-python examples/remote_tasks.py --json
-python -m meshweaver --tasks --json
+# 4. Local Task Worker Execution Engine
+# Demonstrates TaskWorker processing validated TaskEnvelope envelopes, execution timeouts,
+# threadpool isolation for synchronous tasks, and strict rejection of unauthorized code.
+python examples/task_worker_execution.py
 
-# Enable verbose debug logs:
-python examples/remote_tasks.py --verbose
-
-# Submit a task directly to a running mesh cluster:
-python -m meshweaver submit add 125 375 --seeds 127.0.0.1:8001
-python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
+# 5. Local Task Execution Engine
+# Demonstrates standalone TaskExecutionEngine running an asyncio queue with concurrency limits,
+# task lifecycle transitions (PENDING -> RUNNING -> COMPLETED/FAILED/CANCELLED), and cancellation.
+python examples/local_task_execution.py
 ```
 
-### Interactive Terminal Dashboard & CLI Commands
+### Manual Multi-Terminal Cluster Walkthrough
 
-MeshWeaver features an interactive terminal monitoring dashboard built with [Rich](https://github.com/Textualize/rich), providing real-time operational visibility directly in your terminal, with an automatic zero-dependency plain-text ASCII fallback when Rich is not installed.
-
-#### 1. Live Terminal Monitoring Dashboard
-
-Launch the interactive dashboard to view the local node, discovered mesh peers, CPU and memory reports, peer health states, running tasks, and recent execution results/failures:
+You can start independent nodes in separate terminal windows to observe decentralized coordination:
 
 ```bash
-# Launch live dashboard (monitoring local node or cluster via seeds):
-python -m meshweaver monitor --seeds 127.0.0.1:8001
+# Terminal 1: Start Bootstrap Seed Node
+meshweaver start --host 127.0.0.1 --port 8001 --peer-id seed-node
 
-# Start a persistent node with the live dashboard enabled:
-python -m meshweaver start --port 8001 --dashboard
+# Terminal 2: Start Compute Worker Alpha (joining seed)
+meshweaver start --host 127.0.0.1 --port 8002 --peer-id worker-alpha --seeds 127.0.0.1:8001
 
-# Force plain-text ASCII output without Rich formatting:
-python -m meshweaver monitor --plain
-python -m meshweaver start --port 8001 --dashboard --plain
+# Terminal 3: Start Compute Worker Beta (joining seed)
+meshweaver start --host 127.0.0.1 --port 8003 --peer-id worker-beta --seeds 127.0.0.1:8001
 
-# Configure custom refresh interval and run duration:
-python -m meshweaver monitor --refresh-rate 0.5 --duration 30
+# Terminal 4: Launch Live Rich Terminal Dashboard
+meshweaver monitor --seeds 127.0.0.1:8001
+
+# Terminal 5: Submit Tasks
+meshweaver submit add 100 250 --seeds 127.0.0.1:8001
+meshweaver submit reverse_string "MeshWeaver Decentralized" --seeds 127.0.0.1:8001
 ```
 
-#### 2. Submitting Tasks via CLI
+---
 
-Submit allowlisted tasks to a running mesh cluster for load-aware routing and remote execution:
+## CLI Usage Reference
+
+The `meshweaver` command line tool provides subcommands for node operations, cluster monitoring, task submission, and diagnostics.
+
+### Subcommand Overview
+
+```text
+usage: meshweaver [-h] [--config CONFIG_PATH] [--status] [--host HOST] [--port PORT]
+                  [--peer-id PEER_ID] [--seeds SEEDS] [--json] [--timeout TIMEOUT]
+                  [--verbose] [-v]
+                  {status,demo,submit,start,node,peers,list-peers,peer-list,
+                   tasks,task,task-status,monitor,tui,dashboard,web,ui} ...
+```
+
+### 1. `meshweaver start` (alias: `node`)
+Starts a persistent MeshWeaver peer node to serve tasks and participate in gossip.
 
 ```bash
-# Submit an addition task:
-python -m meshweaver submit add 250 750 --seeds 127.0.0.1:8001
+# Start on dynamic port
+meshweaver start
 
-# Submit a string reversal task:
-python -m meshweaver submit reverse_string "Distributed" --seeds 127.0.0.1:8001
+# Start on fixed port with seeds and peer ID
+meshweaver start --port 8001 --peer-id worker-01 --seeds 127.0.0.1:8000
 
-# Output task response as structured JSON:
-python -m meshweaver submit add 10 20 --seeds 127.0.0.1:8001 --json
+# Start with live Rich terminal monitoring dashboard embedded
+meshweaver start --port 8001 --dashboard
+
+# Start with security parameters (TLS + HMAC + Token)
+meshweaver start --port 8001 --tls --cert certs/server.pem --key certs/server.key \
+                 --shared-secret "cluster-secret-key" --auth-token "bearer-token-123"
 ```
 
-#### 3. Listing Discovered Peers & Health States
+| Flag | Description | Default |
+|---|---|---|
+| `--host HOST` | Local network host interface | `127.0.0.1` |
+| `--port PORT` | Local TCP port to bind (`0` for dynamic) | `0` |
+| `--peer-id PEER_ID` | Custom node/peer identifier | `node-<timestamp>` |
+| `--seeds SEEDS` | Comma-separated bootstrap seed peer endpoints | None |
+| `--duration DURATION` | Optional run duration in seconds before auto-stopping | Indefinite |
+| `--dashboard`, `--tui` | Launch embedded live Rich terminal monitoring dashboard | `false` |
+| `--refresh-rate SEC` | Live dashboard refresh interval in seconds | `1.0` |
+| `--plain` | Force plain-text ASCII output without Rich formatting | `false` |
+| `--config PATH` | Path to JSON configuration file | None |
+| `--verbose` | Enable debug logging | `false` |
 
-Inspect cluster topology, peer connectivity, gossip resource metrics (CPU/RAM), and failure states:
+### 2. `meshweaver status`
+Prints local node status and discovered mesh peer summaries.
 
 ```bash
-# Display formatted peers table:
-python -m meshweaver peers --seeds 127.0.0.1:8001
+# Print formatted ASCII table
+meshweaver status
 
-# Output peers list in JSON format:
-python -m meshweaver peers --seeds 127.0.0.1:8001 --json
+# Emit clean structured JSON
+meshweaver status --json
 
-# Force plain-text ASCII table:
-python -m meshweaver peers --seeds 127.0.0.1:8001 --plain
+# Query mesh status via bootstrap seed node
+meshweaver status --seeds 127.0.0.1:8001
 ```
 
-#### 4. Viewing Task Statuses & Execution History
-
-Query running tasks, recent results, and execution failures across the mesh:
+### 3. `meshweaver submit <task_name> [task_args...]`
+Submits an allowlisted task for load-aware routing and remote execution across the mesh.
 
 ```bash
-# List all active and recent tasks:
-python -m meshweaver tasks --seeds 127.0.0.1:8001
+# Submit arithmetic addition task
+meshweaver submit add 125 375 --seeds 127.0.0.1:8001
 
-# Query a specific task ID:
-python -m meshweaver tasks task-9812a4b --seeds 127.0.0.1:8001
+# Submit string reversal task
+meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
 
-# Output task records in JSON format:
-python -m meshweaver tasks --seeds 127.0.0.1:8001 --json
+# Output task response as structured JSON
+meshweaver submit add 10 20 --seeds 127.0.0.1:8001 --json
 ```
 
-#### 5. Graceful Node Shutdown
+### 4. `meshweaver peers` (aliases: `list-peers`, `peer-list`)
+Discovers and lists known mesh peers, network endpoints, health states, and resource metrics.
 
-All long-running CLI commands (`start`, `monitor`, `dashboard`) trap `SIGINT` (Ctrl+C) and `asyncio.CancelledError`, automatically notifying peers with departure notifications (`leave_mesh()`), cancelling active workers, and releasing bound TCP sockets cleanly.
+```bash
+# Display formatted peers table
+meshweaver peers --seeds 127.0.0.1:8001
 
-### Configuration Management & Precedence
+# Output peers list in JSON format
+meshweaver peers --seeds 127.0.0.1:8001 --json
 
-MeshWeaver provides unified configuration management supporting configuration files, environment variables, and CLI overrides with strict priority:
+# Force plain-text ASCII output
+meshweaver peers --seeds 127.0.0.1:8001 --plain
+```
+
+### 5. `meshweaver tasks` (aliases: `task`, `task-status`)
+Inspects active running tasks, recent results, and execution failures across the mesh.
+
+```bash
+# List all active and recent tasks
+meshweaver tasks --seeds 127.0.0.1:8001
+
+# Query a specific task ID
+meshweaver tasks task-9812a4b --seeds 127.0.0.1:8001
+
+# Output task records in JSON format
+meshweaver tasks --seeds 127.0.0.1:8001 --json
+```
+
+### 6. `meshweaver monitor` (alias: `tui`)
+Launches the live interactive Rich terminal monitoring dashboard.
+
+```bash
+# Monitor mesh cluster via seeds
+meshweaver monitor --seeds 127.0.0.1:8001
+
+# Custom refresh interval and duration
+meshweaver monitor --seeds 127.0.0.1:8001 --refresh-rate 0.5 --duration 60
+
+# Force plain-text ASCII output
+meshweaver monitor --seeds 127.0.0.1:8001 --plain
+```
+
+### 7. Common Security Flags (Supported across all subcommands)
+
+| Flag | Description | Default |
+|---|---|---|
+| `--tls` | Enable TLS transport encryption | `false` |
+| `--cert PATH` | Path to X.509 certificate PEM file | None |
+| `--key PATH` | Path to private key PEM file | None |
+| `--ca PATH` | Path to trusted CA certificate PEM file | None |
+| `--require-client-cert` | Require peer client certificate (mTLS) | `false` |
+| `--shared-secret SECRET` | Pre-shared HMAC secret for message integrity | None |
+| `--auth-token TOKEN` | Pre-shared bearer authentication token | None |
+| `--allowed-peers PEERS` | Comma-separated peer ID allowlist | None |
+
+---
+
+## Configuration Management & Environment Variables
+
+MeshWeaver enforces a strict priority hierarchy for all configuration values:
 
 $$\text{CLI Arguments} > \text{Environment Variables} > \text{Configuration File} > \text{Built-in Defaults}$$
 
-#### 1. Configuration File (`meshweaver.example.json`)
-You can pass a configuration file with `--config`:
-```bash
-meshweaver start --config meshweaver.example.json
-```
+### Example Configuration File (`meshweaver.example.json`)
 
-Example configuration schema:
+Pass a configuration file to any command via `--config <path>`:
+
 ```json
 {
   "network": {
@@ -435,450 +490,212 @@ Example configuration schema:
 }
 ```
 
-#### 2. Environment Variables (`MESHWEAVER_*`)
-All core node parameters can be set via environment variables prefixed with `MESHWEAVER_`:
+### Environment Variable Reference
 
-| Environment Variable | Description | Default |
+All core node settings can be managed via environment variables prefixed with `MESHWEAVER_`:
+
+| Environment Variable | Description | Built-in Default |
 |---|---|---|
 | `MESHWEAVER_CONFIG` | Path to JSON configuration file | None |
-| `MESHWEAVER_HOST` | Local network host interface | `127.0.0.1` |
+| `MESHWEAVER_HOST` | Network host interface | `127.0.0.1` |
 | `MESHWEAVER_PORT` | Local network port to bind | `0` (dynamic) |
 | `MESHWEAVER_PEER_ID` | Node peer identifier | Generated |
 | `MESHWEAVER_SEEDS` | Comma-separated seed endpoints (`host:port`) | None |
-| `MESHWEAVER_TIMEOUT` | Network connection/discovery timeout in seconds | `5.0` |
-| `MESHWEAVER_HEARTBEAT_INTERVAL` | Heartbeat pulse interval in seconds | `1.0` |
+| `MESHWEAVER_TIMEOUT` | Connection/discovery timeout in seconds | `5.0` |
+| `MESHWEAVER_HEARTBEAT_INTERVAL` | Heartbeat probe interval in seconds | `1.0` |
 | `MESHWEAVER_MISSED_THRESHOLD` | Missed heartbeats before peer failure | `3` |
 | `MESHWEAVER_GOSSIP_INTERVAL` | Gossip metrics dissemination interval in seconds | `5.0` |
-| `MESHWEAVER_VERBOSE` | Enable verbose debug logging (`1`/`true`) | `false` |
-| `MESHWEAVER_JSON` | Enable structured JSON output (`1`/`true`) | `false` |
+| `MESHWEAVER_VERBOSE` | Enable debug logging (`1`/`true`) | `false` |
+| `MESHWEAVER_JSON` | Output logs/responses as structured JSON | `false` |
 | `MESHWEAVER_PLAIN` | Force plain-text ASCII terminal dashboard | `false` |
 | `MESHWEAVER_TLS_ENABLED` | Enable TLS transport encryption (`1`/`true`) | `false` |
 | `MESHWEAVER_TLS_CERT` | Path to TLS certificate PEM file | None |
 | `MESHWEAVER_TLS_KEY` | Path to TLS private key PEM file | None |
 | `MESHWEAVER_TLS_CA` | Path to TLS CA certificate PEM file | None |
-| `MESHWEAVER_REQUIRE_CLIENT_CERT`| Require peer client certificate (mTLS) | `false` |
-| `MESHWEAVER_SHARED_SECRET` | Pre-shared HMAC secret for message integrity | None |
-| `MESHWEAVER_AUTH_TOKEN` | Pre-shared authentication bearer token | None |
+| `MESHWEAVER_REQUIRE_CLIENT_CERT`| Enforce mutual TLS (mTLS) client verification | `false` |
+| `MESHWEAVER_SHARED_SECRET` | Pre-shared HMAC-SHA256 secret for message signing | None |
+| `MESHWEAVER_AUTH_TOKEN` | Pre-shared peer authentication token | None |
 | `MESHWEAVER_ALLOWED_PEERS` | Comma-separated peer ID allowlist | None |
 
-#### 3. Clear Startup Errors
-MeshWeaver strictly validates configuration inputs (ports within `0..65535`, positive timeouts, valid seed `host:port` pairs, existing certificate paths, and valid JSON structure). In case of invalid inputs, a human-readable diagnostic error is displayed without raw Python tracebacks:
+### Clear Diagnostic Startup Errors
+
+MeshWeaver strictly validates configuration parameters upfront (valid port range `0..65535`, positive timeouts/intervals, valid `host:port` seed endpoints, existing certificate files, and valid JSON structure). If configuration errors occur, a clean human-readable diagnostic error is printed to `stderr` with exit code `2`, suppressing raw Python tracebacks:
+
 ```text
 [MeshWeaver Configuration Error] Invalid port: 99999. Must be an integer between 0 and 65535
 ```
 
-### Multi-Node Cluster Startup and Remote Task Execution
+---
 
-Start independent peer nodes and dispatch tasks across the mesh using either the CLI or the Python API:
+## Interactive Dashboards & Web UI
 
-#### 1. Node Startup Commands
+MeshWeaver provides two observability interfaces: an interactive terminal dashboard and a modern light-themed web SPA.
 
-**Start a Seed/Bootstrap Node:**
+### 1. Rich Terminal Dashboard (TUI)
+
+Built using the `rich` library (with automatic zero-dependency ASCII fallback):
+
 ```bash
-# Start a designated seed node listening on a fixed port:
-python -m meshweaver start --host 127.0.0.1 --port 8001 --peer-id seed-node
+meshweaver monitor --seeds 127.0.0.1:8001
 ```
 
-**Start Worker Nodes:**
+Features:
+- **Local Node Header**: Peer ID, bound address, uptime, DHT contact count, active gossip report count.
+- **Resource Gauges**: Real-time CPU and memory percentage bars.
+- **Peer Directory**: Active, stale, and expired peers with latency (RTT), missed heartbeat counter, and connectivity status.
+- **Task Table**: Real-time task execution progress, worker ID assignment, durations, and failure previews.
+
+### 2. Professional Web Dashboard (FastAPI + React SPA)
+
 ```bash
-# In separate terminal windows, start worker nodes connected to the seed node:
-python -m meshweaver start --host 127.0.0.1 --port 8002 --peer-id worker-node-1 --seeds 127.0.0.1:8001
-python -m meshweaver start --host 127.0.0.1 --port 8003 --peer-id worker-node-2 --seeds 127.0.0.1:8001
-```
-
-**Programmatic Startup in Python:**
-```python
-import asyncio
-from meshweaver import PeerNode
-
-async def main() -> None:
-    async with PeerNode(peer_id="worker-node-1", host="127.0.0.1", port=8002) as worker:
-        worker.enable_gossip()
-        await worker.join_mesh(["127.0.0.1:8001"])
-        print(f"Worker {worker.peer_id} active on port {worker.bound_port}")
-        # Keep serving until cancelled
-        while True:
-            await asyncio.sleep(1.0)
-
-asyncio.run(main())
-```
-
-#### 2. Task Submission Example
-
-**Submit via CLI:**
-```bash
-# Submit built-in example tasks to the mesh:
-python -m meshweaver submit add 15 27 --seeds 127.0.0.1:8001
-python -m meshweaver submit reverse_string "MeshWeaver" --seeds 127.0.0.1:8001
-
-# Submit and output structured JSON:
-python -m meshweaver submit add 100 250 --seeds 127.0.0.1:8001 --json
-```
-
-**Submit via Python API:**
-```python
-import asyncio
-from meshweaver import PeerNode, TaskStatus
-
-async def main() -> None:
-    async with PeerNode(peer_id="client-node", host="127.0.0.1", port=0) as client:
-        client.enable_gossip()
-        await client.join_mesh(["127.0.0.1:8001"])
-
-        # Submit task with load-aware routing and automatic failover retry
-        response = await client.submit_task("add", 15, 27)
-        if response.status == TaskStatus.SUCCESS:
-            print(f"[SUCCESS] Task ID: {response.task_id} | Result: {response.result} (took {response.execution_time:.4f}s)")
-        else:
-            print(f"[ERROR] Task ID: {response.task_id} | Code: {response.error.code} | Message: {response.error.message}")
-
-asyncio.run(main())
-```
-
-#### 3. Expected Output
-
-**CLI Text Output (Success):**
-```text
-[MeshWeaver] Node 'cli-client-48201' started on 127.0.0.1:58432
-[MeshWeaver] Joining mesh via seeds: ['127.0.0.1:8001']...
-[SUCCESS] Task ID: task-66d4918e7e2343fa89b25d0c75c59325 | Result: 42
-[MeshWeaver] Node 'cli-client-48201' stopped gracefully.
-```
-
-**CLI JSON Output (Success):**
-```json
-{
-  "task_id": "task-66d4918e7e2343fa89b25d0c75c59325",
-  "status": "success",
-  "result": 42,
-  "error": null,
-  "execution_time": 0.0014,
-  "metadata": {}
-}
-```
-
-**Rejection Output (Unknown Task):**
-```text
-[FAILURE] Task ID: task-e2985f5e27a64117b4c6e00b21a716c5 | Code: UNKNOWN_TASK | Error: Task 'unknown_task' is not registered in this engine's TaskRegistry
-```
-
-#### 4. Current Limitations
-
-- **At-least-once execution semantics for retried tasks:** When tasks fail due to worker disconnection, socket drop, or communication timeout, MeshWeaver's scheduler reassigns the task to alternate healthy worker candidates up to a bounded retry limit (`max_retries`). Retrying a task provides at-least-once execution semantics and may execute the task more than once if the prior worker completed computation before dropping the connection. MeshWeaver explicitly does not claim or guarantee exactly-once execution. Retried responses carry explicit metadata annotations (`execution_semantics="at-least-once"` and `retried=True`).
-- **Strict safety & no arbitrary remote code execution:** MeshWeaver only executes explicitly registered functions in a node's `TaskRegistry`. Deserialization of arbitrary Python code objects, unpickled data, and unsafe identifiers (`eval`, `exec`, `os`, `sys`, dunder methods) are rejected by design.
-- **Payload & frame size limits:** Individual task requests and responses are limited to 64 KB (`MAX_TASK_PAYLOAD_SIZE`), and binary framing enforces a 10 MB limit (`MAX_FRAME_SIZE`) to protect against memory exhaustion.
-- **JSON-serializable data only:** Task positional arguments (`args`), keyword arguments (`kwargs`), and return values must consist of JSON-serializable primitives (int, float, str, bool, list, dict, None).
-- **Gossip eventual consistency:** Load-aware routing selects the candidate peer with the lowest composite load score based on periodic gossip dissemination. Transient load fluctuations between gossip rounds can produce temporary routing skew until the next gossip synchronization cycle.
-
-## Roadmap
-
-### Week 1 — Networking Foundation (Completed)
-
-- [x] **Package structure and configuration:** Initialized zero-dependency `meshweaver` package with Python 3.11+ type hints and `pytest` configuration.
-- [x] **Async message protocol:** Implemented length-prefixed binary framing, 10 MB frame limits, and JSON-serialized `Message` envelopes.
-- [x] **Async peer networking:** Built `PeerNode` and `PeerConnection` with non-blocking stream handling, dynamic port binding, handshake negotiation, and correlated request-response matching.
-- [x] **Validated task schemas & registry:** Created `TaskRequest`, `TaskResponse`, `TaskErrorInfo`, and `TaskRegistry` with strict identifier safety, 64 KB size limits, and code injection prevention.
-- [x] **Asynchronous task execution engine:** Implemented standalone `TaskExecutionEngine` with an `asyncio`-based pending queue, worker pool with configurable concurrency (`max_concurrency`), strict lifecycle task states (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`), monotonic duration/timestamps, exception and error boundary handling, graceful shutdown, and local task cancellation.
-- [x] **Two-peer communication demonstration:** Created `examples/two_peers.py` and integration tests demonstrating handshake, ping/pong exchange, local task execution, error handling, and orderly shutdown.
-
-### Asynchronous Task Execution Engine
-
-MeshWeaver's local task engine decouples task scheduling and execution from network transport:
-
-| Mechanism | Description |
-|---|---|
-| **Unique Task IDs** | Every submitted task receives a unique validated identifier (`task_id`), either user-specified or automatically generated as a UUID hex. |
-| **Asyncio Pending Queue** | Uncompleted tasks wait in an `asyncio.Queue` pending execution, decoupling task ingestion rate from worker execution speed. |
-| **Strict Lifecycle States** | Tasks deterministically transition through `PENDING` -> `RUNNING` -> `COMPLETED`, `FAILED`, or `CANCELLED`. |
-| **Worker Concurrency Control** | Background worker coroutines bounded by `max_concurrency` process tasks without thread-safety overhead or runaway concurrency. |
-| **Security & Safety Boundaries** | Only functions explicitly registered in `TaskRegistry` can execute. Arbitrary code, unpickled objects, dunder keys, and dangerous names (`eval`, `exec`, `os`, `sys`) are blocked. |
-| **Result & Error Isolation** | Synchronous and asynchronous exceptions are safely caught and encapsulated in `TaskErrorInfo` without crashing worker loops or leaking host internals. |
-| **Timestamps & Durations** | Monotonic timestamps (`created_at`, `started_at`, `completed_at`) and duration calculations record sub-millisecond execution metrics. |
-| **Graceful Shutdown & Cancellation** | Supports orderly shutdown (`shutdown(wait=True)`), immediate pending queue drainage (`cancel_pending=True`), and per-task cancellation (`cancel_task`). |
-
-### Week 2 — Discovery and Workload Sharing (Completed)
-- [x] **Dynamic peer registry:** Implemented `PeerRegistry`, `PeerRecord`, and `PeerEndpoint` with deterministic state transitions (`ACTIVE` -> `STALE` -> `EXPIRED`), collision handling, and TTL pruning.
-- [x] **DHT-inspired peer discovery & routing table:** Implemented 160-bit `NodeID` keyspace, deterministic XOR distance metric, `KBucket` routing buckets with LRU ordering and replacement caching, 160-bucket `RoutingTable` partitioned by Common Prefix Length (CPL), closest-peer selection, duplicate suppression, bounded queries, and resilient iterative lookup with timeouts.
-- [x] **Routing-table and DHT tests:** Added comprehensive unit and integration tests for XOR distance metric properties, bucket management (capacity, LRU ordering, updates, promotions), peer lookup, and unavailable/unresponsive peers.
-- [x] **Gossip-based resource reporting:** Implemented asynchronous `GossipEngine`, `ResourceCollector`, `GossipStore`, and `NodeResourceReport` periodically sharing CPU, RAM, active task count, node identity, timestamp, and health status with bounded fanout peers.
-- [x] **Workload gossip & anti-amplification:** Built strict monotonic report validation, clock skew rejection, stale record discarding, TTL expiration, and amplification bounds (`fanout`, `max_hops`, seen cache, and sender exclusion).
-- [x] **Node status and registry API:** Integrated peer discovery, registry membership, and gossip records into a clean internal `NodeStatusAPI`, `NodeStatusSnapshot`, and `PeerStatus`. Exposes registered peers, last-seen timestamps, reported resource metrics, peer health, active socket connections, and DHT proximity. Added structured logging and CLI `status` command (`--json`, `--seeds`).
-- [x] **Multi-node networking & gossip verification (Milestone 5):** Built automated integration tests and a deterministic loopback demonstration starting at least three MeshWeaver nodes. Verified bootstrap discovery, peer lookup, gossip exchange, node-status reporting, and graceful shutdown without Internet access. Added example configuration (`examples/mesh_config.json`) and documented run commands.
-- [x] **End-to-end remote task execution & load-aware routing:** Implemented `TaskRouter`, `LoadAwareRoutingStrategy`, and `PeerNode.submit_task` integrating peer discovery, async TCP networking, workload gossip, and task serialization. Features composite load scoring (active tasks, CPU, memory, health status), automatic candidate failover retry, strict execution boundaries (only registered tasks execute, rejecting code/import injection), structured `TaskResponse` envelopes, and comprehensive multi-node integration tests.
-
-### Load-Aware Task Routing and Execution
-
-MeshWeaver provides an integrated decentralized task routing engine:
-
-| Mechanism | Description |
-|---|---|
-| **Composite Load Scoring** | Evaluates active task count (weight: 10.0), CPU percent (weight: 0.5), memory percent (weight: 0.5), and health status penalties (`DEGRADED`: +50, `UNHEALTHY`: +1000). Ranks candidate worker peers in ascending order of load score. |
-| **Deterministic Tie-Breaking** | Uses deterministic XOR distance between candidate node IDs and the task identifier anchor (`NodeID.from_peer(task_id)`) to break score ties evenly without hotspotting. |
-| **Automatic Failover Retry** | If connection or transmission to the primary candidate peer fails or times out, `submit_task` automatically fails over to the next best candidate peer. |
-| **Strict Execution Security** | Remote payloads can only execute explicitly registered handlers (`TaskRegistry`). Arbitrary Python imports, code objects, dunders, and reserved names (`eval`, `exec`, `os`, `sys`) are strictly rejected. |
-| **Structured Task Envelopes** | Requests and responses are encapsulated in validated `TaskRequest` and `TaskResponse` objects carrying unique task IDs, status (`success`, `failure`, `error`), result or `TaskErrorInfo`, execution timestamps, and metadata. |
-| **Observability & Inspection** | `TaskRouter.explain_routing()` emits structured breakdowns of evaluated peers, composite scores, active tasks, CPU/RAM, and health statuses for dashboards and logs. |
-
-### Gossip-Based Workload & Resource Monitoring
-
-MeshWeaver implements an asynchronous gossip engine for periodic workload and health status dissemination across neighboring peers:
-
-| Mechanism | Description |
-|---|---|
-| **Resource Collection** | Samples CPU percent, memory percent, active task count, node identity, timestamp, and operational health status (`HEALTHY`, `DEGRADED`, `UNHEALTHY`). Uses standard Python facilities (`ctypes` on Windows, `/proc` on Linux, `os.getloadavg` on Unix) with an optional `psutil` dependency for richer hardware metrics. |
-| **Monotonic Freshness** | Out-of-order, equal, or stale timestamps are rejected deterministically per node ID (`GossipStore`). Future timestamps exceeding clock skew tolerance (60s) are discarded. |
-| **Stale Record Handling** | Configurable staleness threshold (30s) marks inactive peer records as stale, and time-to-live (`ttl=60s`) deterministically purges expired status reports. |
-| **Bounded Fanout** | Periodic gossip rounds select at most `fanout` peers (default: 3) rather than broadcasting, avoiding $O(N^2)$ message explosions. |
-| **Hop Limit & Anti-Amplification** | Reports carry a hop counter incremented on each relay; reports reaching `max_hops` (default: 3) are halted. Senders are excluded from relays, and a seen timestamp cache prevents cyclic re-transmission. |
-
-### Node Status and Registry Inspection API
-
-The node status subsystem unifies discovery, registry membership, connection state, and gossip metrics into an observable snapshot:
-
-| Feature | Description |
-|---|---|
-| **`NodeStatusAPI`** | Core internal inspection service accessible via `node.status_api`, providing `get_node_status()`, `get_peer_status(peer_id)`, `list_peers()`, and `log_status()`. |
-| **`PeerStatus`** | Unified snapshot for each peer exposing `endpoint`, `state` (`ACTIVE`, `STALE`, `EXPIRED`), `last_seen`, `last_seen_seconds_ago`, `cpu_percent`, `memory_percent`, `active_task_count`, `health_status`, `is_connected`, and `dht_distance`. |
-| **Mesh Lifecycle Primitives** | `await node.join_mesh(seeds)` connects and handshakes with bootstrap nodes and discovers mesh peers; `await node.leave_mesh()` broadcasts an orderly `LEAVE` announcement and cleans up sockets. |
-| **Structured Logging** | `setup_structured_logging` and `log_node_status` emit structured key-value messages with full snapshot payloads in `extra["node_status"]` for log aggregators. |
-| **CLI Status Command** | `python -m meshweaver status` displays an ASCII table dashboard; `python -m meshweaver status --json` emits clean, parseable JSON; `--seeds` enables querying remote mesh status. |
-
-
-### Week 3 — Task Execution and Reliability (Completed)
-- [x] **Asynchronous task worker execution engine (Milestone 1, Commit 11):** Implemented `TaskWorker`, `TaskEnvelope`, `TaskResult`, and `TaskLifecycleState` (`pending` -> `running` -> `succeeded`, `failed`, `cancelled`). Accepts validated task envelopes, validates task IDs and 64 KB payload limits. Executes supported tasks asynchronously where appropriate (async coroutines directly, synchronous handlers safely in worker threads). Adds per-task and default execution timeouts, structured exception handling, and configurable concurrency limits (`concurrency`). Strictly prevents arbitrary untrusted code execution (only registered tasks execute, rejecting `eval`, `exec`, `os`, `sys`, dynamic imports, code objects, and dunder keys). Includes comprehensive unit tests (`tests/test_worker.py`) and a working example (`examples/task_worker_execution.py`).
-- [x] **Load-aware task scheduling (Milestone 2, Commit 12):** Implemented `TaskScheduler`, `LoadAwareScheduler`, `SchedulerConfig`, and `SchedulingDecision` selecting optimal worker peers using recent CPU usage %, memory usage %, active task count, peer health status (`HEALTHY`, `DEGRADED`, `UNHEALTHY`, `UNKNOWN`), and task compatibility (supported tasks, capability tags, worker capacity limits, and draining modes). Evaluates candidates via a documented composite scoring function with configurable weights and penalties. Employs deterministic two-stage tie-breaking (Kademlia XOR distance to task anchor, followed by lexicographical peer ID). Enforces strict rejection of stale resource reports (age > 30s) and avoids scheduling work to failed, unhealthy, or expired peers. Includes detailed explainability (`scheduler.explain()`), a full test suite (`tests/test_scheduler.py`), and a reproducible example (`examples/load_aware_scheduling.py`).
-- [x] **Route tasks across peer nodes (Milestone 3, Commit 13):** Integrated the scheduler, peer discovery, networking, and worker execution into a complete task-submission workflow. Clients submit tasks to the mesh, receive structured acknowledgements (`TaskAck`) with correlation IDs and routed worker IDs, have tasks routed to eligible peers selected by the load-aware scheduler, and obtain final results (`TaskResponse`) or structured errors. Supports end-to-end correlation ID tracking, request timeouts (`TASK_TIMEOUT`), duplicate-submission handling (idempotency, cached terminal results, in-flight deduplication without redundant execution), and execution-status queries (`TaskStatusReport` across nodes via `query_task_status`). Includes a comprehensive three-node end-to-end integration test suite (`tests/test_routing_workflow.py`) and an updated reproducible demonstration (`examples/remote_tasks.py`).
-- [x] **Add heartbeat and failure recovery (Milestone 4, Commit 14):** Added active heartbeat monitoring (`HeartbeatMonitor`, `HeartbeatConfig`), configurable probe intervals, probe timeouts, and missed-heartbeat thresholds. Implemented peer health transitions (`HEALTHY` -> `DEGRADED` -> `UNHEALTHY`) and automatic exclusion of unresponsive nodes from scheduling. Implemented fast sub-millisecond connection break detection (`ConnectionClosedError` on in-flight requests), distributed task ownership tracking (`TaskOwnership`), and bounded retries (`max_retries`) across alternate eligible workers. Explicitly documented that retrying a task provides at-least-once execution semantics and may execute more than once if a worker disconnects mid-computation, never claiming exactly-once execution. Added a comprehensive test suite covering heartbeat loss, worker shutdown, retry limits, and recovery (`tests/test_heartbeat_failure.py`).
-- [x] **Integrate and test the complete workflow (Milestone 5, Commit 15):** Executed an end-to-end review of task submission, serialization, peer discovery, gossip, load-aware scheduling, execution, result retrieval, and worker failure recovery. Added a dedicated integration test suite (`tests/test_workflow_integration.py`) covering successful execution across heterogeneous worker nodes, application-level task exceptions (`TaskErrorInfo`), unavailable workers (`NO_PEERS_AVAILABLE`, `PEER_UNAVAILABLE`), request timeout handling (`TASK_TIMEOUT`), and bounded retries under at-least-once execution semantics. Refactored candidate selection and local execution helpers across `PeerNode` and `TaskRouter`, eliminating code duplication and ensuring verified CLI commands work out-of-the-box.
-
-### Heartbeat Monitoring and At-Least-Once Failure Recovery
-
-| Mechanism | Description |
-|---|---|
-| **Active Heartbeat Probes** | `HeartbeatMonitor` periodically sends `HEARTBEAT` requests and awaits `HEARTBEAT_ACK` responses, recording latency metrics (RTT ms) and verifying remote node responsiveness. |
-| **Peer Health Transitions** | Unanswered probes increment `missed_heartbeats`. Peers transition `HEALTHY` -> `DEGRADED` (1 miss) -> `UNHEALTHY` (>= threshold). Successful probes restore `HEALTHY` status and trigger recovery callbacks. |
-| **Unresponsive Node Exclusion** | `TaskScheduler` strictly rejects worker candidates flagged as `UNHEALTHY`, `is_unresponsive=True`, or exceeding the missed heartbeat threshold, routing tasks exclusively to healthy peers. |
-| **Fast Socket Failure Detection** | In-flight request message IDs are indexed to connection descriptors; when a TCP socket closes or receives EOF, pending requests immediately fail with `ConnectionClosedError` without waiting for request timeouts. |
-| **Task Ownership & History** | `TaskOwnership` tracks `task_id`, `owner_id`, `assigned_worker_id`, `worker_history`, `error_history`, `retry_count`, and `max_retries`. |
-| **Bounded Retries** | If a worker disconnects or fails mid-execution, `submit_task` marks the worker failed, logs an at-least-once warning, and reassigns the task to the next eligible worker. Halts deterministically with `MAX_RETRIES_EXCEEDED` when the retry limit is reached. |
-| **At-Least-Once Semantics** | Retrying tasks upon worker disconnect provides at-least-once execution semantics; tasks may execute more than once if a worker disconnected after starting computation. MeshWeaver explicitly does not claim exactly-once execution. |
-
-## Professional Web Dashboard & REST/WebSocket API
-
-MeshWeaver includes a professional, light-themed web dashboard and a FastAPI backend adapter that connects directly to the running `PeerNode` core.
-
-```text
-       MeshWeaver PeerNode (Python asyncio)
-          │  TCP Stream Framing (Kademlia DHT, Gossip, Heartbeats)
-          ▼
-   ┌──────────────────────────────────────────────┐
-   │         FastAPI Backend Adapter              │
-   │  REST Endpoints  │  WebSocket Live Stream    │
-   │  - /api/health   │  - /ws/events             │
-   │  - /api/peers    │    * Instant event push   │
-   │  - /api/tasks    │    * Periodic status sync │
-   │  - /api/metrics  │                           │
-   └──────────────────────┬───────────────────────┘
-                          │ HTTP / WS JSON
-                          ▼
-   ┌──────────────────────────────────────────────┐
-   │       React + TypeScript + Vite SPA          │
-   │  - Tailwind CSS Light Theme (#F8FAFC)        │
-   │  - Recharts Workload & Task Analytics        │
-   │  - Interactive SVG Network Topology Graph    │
-   │  - Strict Allowlist Task Dispatcher Form     │
-   └──────────────────────────────────────────────┘
-```
-
-### Dashboard Pages
-
-1. **Overview**: Key network KPIs (active peers, in-flight tasks, success rate, DHT contacts), task execution area chart, peer CPU utilization bar chart, recent tasks feed, and system event log.
-2. **Network Topology**: Interactive SVG topology canvas mapping the local coordinator and satellite peers, displaying live connection links, probe latencies, health states, and a click-to-inspect telemetry drawer.
-3. **Peers**: Searchable peer directory with lifecycle state filters, CPU and RAM load indicators, active task counters, heartbeat latency, and full peer metadata inspector.
-4. **Tasks**: Distributed task management interface with search, status filtering, execution duration, and an allowlisted task submission modal (supporting `add`, `reverse_string`, `echo`, and `ping` with zero arbitrary code execution).
-5. **Monitoring**: Recharts-powered telemetry displaying CPU load by peer, RAM usage by peer, task execution status distribution (Pie/Donut), and peer availability breakdown.
-6. **Events & Logs**: Real-time event log with severity filtering (`info`, `success`, `warning`, `error`), peer/task correlation tags, and expandable JSON metadata payloads.
-7. **Settings**: Configurable backend API target URL, connection testing button, background polling cadence selector (2s, 5s, 10s, manual), light theme verification, and system reliability specifications.
-
-### REST & WebSocket API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health check returning node ID, bound TCP port, uptime, and running status. |
-| `GET` | `/api/node` | Comprehensive snapshot of local node resources, DHT ID, registered tasks, and heartbeat settings. |
-| `GET` | `/api/peers` | List all tracked mesh peers with CPU%, RAM%, active tasks, health, and latency. |
-| `GET` | `/api/peers/{peer_id}` | Detailed peer record, heartbeat probe history, and declared task capabilities. |
-| `GET` | `/api/tasks` | List all tracked tasks from deduplication and execution stores with status filtering. |
-| `GET` | `/api/tasks/{task_id}` | Retrieve specific task execution result, error info, and ownership retry history. |
-| `GET` | `/api/tasks/available` | List allowlisted task functions supported by the node's `TaskRegistry`. |
-| `POST` | `/api/tasks` | Submit an allowlisted task for mesh distribution with timeout and argument validation. |
-| `GET` | `/api/metrics` | Aggregated system metrics, task success rate, average duration, and peer loads. |
-| `GET` | `/api/events` | Chronological event stream with limit, severity, and event type filtering. |
-| `WS` | `/ws/events` | Live WebSocket stream pushing real-time events and 2.5s status heartbeats. |
-| `GET` | `/` | Serves the built production React SPA static assets directly from FastAPI. |
-
-### How to Run the Application
-
-#### 1. Backend Dashboard Server
-Start a MeshWeaver node with the FastAPI REST and WebSocket API adapter:
-```powershell
+# Start MeshWeaver node with FastAPI REST & WebSocket adapter:
 python -m meshweaver dashboard --port 8001 --api-port 8000
 ```
-- P2P Mesh Port: `8001`
-- Dashboard API & Web UI: `http://127.0.0.1:8000`
-- Interactive Swagger API Docs: `http://127.0.0.1:8000/docs`
 
-#### 2. Frontend Development Server (Optional)
-If modifying the frontend code, run the Vite development server with hot module reloading:
-```powershell
-cd web
-npm run dev
-```
-Open `http://localhost:5173` in your browser. Requests to `/api` and `/ws` automatically proxy to `http://127.0.0.1:8000`.
+- **Web Dashboard**: `http://127.0.0.1:8000`
+- **Interactive Swagger REST Docs**: `http://127.0.0.1:8000/docs`
+- **WebSocket Event Stream**: `ws://127.0.0.1:8000/ws/events`
 
-#### 3. Production Frontend Build
-To compile the TypeScript/React frontend into static assets served directly by FastAPI:
-```powershell
-cd web
-npm run build
-```
-Once built, navigating to `http://127.0.0.1:8000` immediately serves the React SPA.
+**Dashboard Pages**:
+1. **Overview**: Key network KPIs, task execution area charts, peer CPU bar charts, and recent events.
+2. **Network Topology**: Interactive SVG canvas mapping nodes, active TCP links, and probe latencies.
+3. **Peers**: Searchable peer directory with lifecycle filters, CPU/RAM indicators, and metadata inspector.
+4. **Tasks**: Distributed task management interface with status filters and allowlisted task submission modal.
+5. **Monitoring**: Analytics displaying CPU/RAM distribution, task state breakdown, and availability metrics.
+6. **Events & Logs**: Chronological event stream with severity filtering and expandable JSON payloads.
+7. **Settings**: Configurable backend target URL, polling cadence, and system specs.
 
-### Running a Multi-Peer Demonstration with Dashboard
+---
 
-To observe the dashboard in a distributed mesh environment with multiple peers:
+## Testing Guide
 
-1. **Terminal 1 — Start Coordinator Node with Dashboard:**
-   ```powershell
-   python -m meshweaver dashboard --port 8001 --api-port 8000 --peer-id coordinator-alpha
-   ```
+The MeshWeaver test suite contains **493 automated tests** covering all subsystems, edge cases, failure recoveries, and security boundaries.
 
-2. **Terminal 2 — Start Worker Node Beta (joining Coordinator):**
-   ```powershell
-   python -m meshweaver start --port 8002 --peer-id worker-beta --seeds 127.0.0.1:8001
-   ```
+### Running Tests
 
-3. **Terminal 3 — Start Worker Node Gamma (joining Coordinator):**
-   ```powershell
-   python -m meshweaver start --port 8003 --peer-id worker-gamma --seeds 127.0.0.1:8001
-   ```
+```bash
+# Run the complete test suite
+pytest
 
-4. **Open Dashboard:**
-   Open `http://127.0.0.1:8000` in your web browser. You will see:
-   - 3 nodes visible in the **Network Topology** graph with active TCP links.
-   - Live CPU, RAM, and heartbeat latency in the **Peers** table.
-   - Tasks submitted from the **Tasks** page dynamically routed to worker nodes based on composite load scores.
+# Run with verbose output and short tracebacks
+pytest -v --tb=short
 
-### Peer Security & Authenticated Communication
-
-MeshWeaver includes a comprehensive, zero-dependency security layer for peer communication, supporting transport encryption, mutual certificate verification, authenticated control messages, and replay protection.
-
-#### 1. TLS and Mutual TLS (mTLS)
-Configurable using Python's standard `ssl.SSLContext`:
-- **Server TLS**: Nodes present an X.509 server certificate (`certfile`) and private key (`keyfile`) to encrypt peer-to-peer TCP connections.
-- **Client Verification**: Outbound connections verify the remote peer against trusted Certificate Authorities (`cafile` or system roots).
-- **Mutual TLS (mTLS)**: Nodes can require client certificates (`require_client_cert=True`), ensuring that only peers with certificates signed by the trusted cluster CA can connect.
-- **Modern Ciphers**: Restricts protocols to TLS 1.2+ and disables legacy SSLv2, SSLv3, TLS 1.0, and TLS 1.1.
-
-```python
-from meshweaver import PeerNode, TLSConfig
-
-# Coordinator / Server with TLS
-server_tls = TLSConfig(
-    enabled=True,
-    certfile="certs/server.pem",
-    keyfile="certs/server.key",
-    cafile="certs/ca.pem",
-    require_client_cert=True,  # Enforce mTLS
-)
-node = PeerNode(peer_id="coordinator", tls_config=server_tls)
+# Run specific test suites
+pytest tests/test_config.py             # Packaging, configuration, env vars, error handling
+pytest tests/test_cli_dashboard.py      # Rich terminal dashboard and ASCII fallback
+pytest tests/test_security.py           # TLS, mTLS, HMAC integrity, replay cache, DoS limits
+pytest tests/test_workflow_integration.py # End-to-end task routing and failover recovery
+pytest tests/test_heartbeat_failure.py  # Heartbeat probes, health states, disconnect detection
+pytest tests/test_scheduler.py          # Load-aware candidate scoring and ranking
+pytest tests/test_worker.py             # TaskWorker timeouts and exception isolation
+pytest tests/test_dht.py                # 160-bit keyspace, XOR distance, k-buckets, lookups
+pytest tests/test_gossip.py             # Workload gossip dissemination and anti-amplification
+pytest tests/test_peers.py              # Peer registry and state machine transitions
+pytest tests/test_protocol.py           # Length-prefixed wire framing and envelopes
 ```
 
-#### 2. Message Integrity (HMAC-SHA256)
-When a `shared_secret` is configured:
-- Every outbound message is canonically serialized (sorted keys, compact JSON, excluding the signature field) and signed with HMAC-SHA256.
-- Inbound messages are verified before dispatch. Tampered payloads, modified message IDs, altered timestamps, or forged headers are immediately rejected with `IntegrityError`.
+---
 
-```python
-# Enable HMAC-SHA256 signing with a pre-shared secret
-node = PeerNode(peer_id="worker-1", shared_secret="super-secret-cluster-key")
-```
+## Troubleshooting
 
-#### 3. Peer Authentication & Allowlisting
-- **Pre-Shared Bearer Token**: Nodes validate a pre-shared authentication token during initial TCP handshakes using constant-time string comparison (`secrets.compare_digest`). Peers lacking the valid token are rejected with `HandshakeError`.
-- **Authorized Peer Whitelist**: Nodes can configure `allowed_peers` to restrict connections exclusively to recognized peer identifiers.
+### 1. Port Already in Use (`[WinError 10048]` / `EADDRINUSE`)
+- **Cause**: Another process or previous node instance is still bound to the requested port.
+- **Solution**: Terminate the lingering process, specify an alternate port via `--port <PORT>`, or pass `--port 0` to let the OS bind a dynamic available port.
 
-```python
-node = PeerNode(
-    peer_id="worker-2",
-    auth_token="cluster-auth-token-xyz",
-    allowed_peers={"coordinator", "worker-1", "worker-2"},
-)
-```
+### 2. Connection Refused (`[WinError 1225]` / `ECONNREFUSED`)
+- **Cause**: The seed node endpoint specified in `--seeds` is not running or is listening on a different address/port.
+- **Solution**: Start the designated seed node first, verify its bound address and port in the startup banner, and confirm connectivity.
 
-#### 4. Replay Attack Mitigation
-A sliding timestamp window (`replay_window`, default 60s) validates message freshness and records seen message IDs in an in-memory cache with bounded TTL. Outdated messages, future clock drift (>30s), or replayed message IDs are rejected with `ReplayAttackError`.
+### 3. Windows Application Control / AppLocker Blocks `meshweaver.exe`
+- **Cause**: Windows Application Control policy restricts executing newly created `.exe` stubs generated by pip in user directories.
+- **Solution**: Invoke the module directly using Python: `python -m meshweaver [command]`.
 
-#### 5. Frame & Payload Size Limits
-Guards against memory exhaustion (DoS):
-- Inbound frames cannot exceed `max_frame_size` (default 4 MiB).
-- Inbound payloads cannot exceed `max_payload_size` (default 1 MiB).
-- Malformed inputs, null bytes, or oversized payloads are rejected without crashing the node.
+### 4. TLS Handshake / Certificate Verification Failed (`HandshakeError`, `SSLError`)
+- **Cause**: Outbound client cannot verify the server certificate against system roots or provided CA file; or mTLS is enabled and client certificate was not supplied.
+- **Solution**: Pass `--ca certs/ca.pem` to provide the trusted root, or verify that `--cert` and `--key` paths exist and match.
 
-#### 6. Cryptographic Dependencies & Key Management
-- Built-in zero-dependency security uses Python's standard library `ssl`, `hmac`, `hashlib`, and `secrets`.
-- For advanced cryptographic workflows, `cryptography>=42.0.0` is declared as an optional dependency (`pip install "meshweaver[security]"`).
-- **Key Management Guidance**:
-  - Keep private keys (`*.key`) and shared secrets out of version control and Git.
-  - Store TLS private keys with restrictive OS filesystem permissions (`chmod 600`).
-  - Distribute shared HMAC secrets via environment variables or secret management vaults (e.g., HashiCorp Vault, AWS Secrets Manager).
+### 5. Message Integrity Verification Failed (`IntegrityError`)
+- **Cause**: The HMAC signature computed over the message payload does not match the sender's signature.
+- **Solution**: Ensure all nodes in the cluster share the identical `--shared-secret` (or `MESHWEAVER_SHARED_SECRET`).
 
-#### 7. Security Boundaries & Sandboxing Disclaimer
-> [!IMPORTANT]
-> **Arbitrary Python Execution Is NOT Sandboxed**:
-> MeshWeaver enforces a strict **task function allowlist** via `TaskRegistry` (`add`, `reverse_string`, `echo`, `ping`) and completely rejects unsafe pickle/cloudpickle deserialization, `eval`, `exec`, and bytecode injection.
-> However, task execution is performed directly in Python workers and **does NOT provide an OS-level, container-level, or hardware sandbox**. MeshWeaver should never execute arbitrary, untrusted remote Python code.
+### 6. Unauthorized Peer Handshake (`HandshakeError: Authentication failed`)
+- **Cause**: The remote peer did not provide the required bearer token, or its peer ID is not in the node's `--allowed-peers` allowlist.
+- **Solution**: Verify `--auth-token` and ensure the joining peer ID is included in `--allowed-peers`.
 
-### Security Guarantees & Known Limitations
+### 7. Task Rejected (`UNKNOWN_TASK`)
+- **Cause**: The submitted task name is not registered in the worker's `TaskRegistry`.
+- **Solution**: MeshWeaver only executes explicitly registered tasks (`add`, `reverse_string`, `echo`, `ping`). Custom tasks must be registered on the node before submission.
 
-1. **Strict Function Allowlisting**: Task submission only permits execution of pre-registered functions declared in `node.task_registry`. Arbitrary Python expressions, `eval`, `exec`, dynamic imports, code objects, and pickle deserialization are blocked.
-2. **At-Least-Once Delivery**: Distributed task failover upon worker disconnection provides at-least-once execution semantics; tasks may execute more than once if a worker dropped connection mid-computation. MeshWeaver explicitly does not claim exactly-once execution.
-3. **Authenticated Transport**: Peer communication supports TLS 1.2+ encryption, mutual certificate validation (mTLS), HMAC-SHA256 message signing, replay protection, and bearer tokens. Cleartext TCP remains available for isolated local development.
+### 8. Rich Dashboard Not Displaying Colors/Panels
+- **Cause**: The `rich` package is not installed.
+- **Solution**: MeshWeaver automatically falls back to clean plain-text ASCII formatting. To enable the rich colored TUI, install with `pip install "meshweaver[cli]"` or `pip install "meshweaver[all]"`.
+
+---
+
+## Security Boundaries & Threat Model
+
+> [!CAUTION]
+> ### Arbitrary Remote Python Execution Is NOT Sandboxed
+> MeshWeaver is an educational peer-to-peer task broker. It strictly enforces a **task function allowlist** via `TaskRegistry` (`add`, `reverse_string`, `echo`, `ping`) and rejects dynamic imports, `eval`, `exec`, code objects, and pickle deserialization.
+> 
+> However, task execution occurs directly within Python worker coroutines/threads and **does NOT provide an operating-system level, containerized, or hardware-enforced sandbox**. MeshWeaver should **never be exposed to untrusted networks** or configured to execute arbitrary user-submitted Python code.
+
+### Security Guarantees & Safeguards
+
+1. **Strict Function Allowlisting**: Nodes only execute tasks explicitly registered in `node.task_registry`. Requests with arbitrary Python expressions, dunder methods (`__init__`, `__class__`), or reserved names (`eval`, `exec`, `os`, `sys`) are rejected immediately.
+2. **Safe Serialization**: Only JSON-compatible primitives (`int`, `float`, `str`, `bool`, `list`, `dict`, `None`) are allowed. Python `pickle` is strictly forbidden.
+3. **Authenticated Peer Transport**: Peer communication supports TLS 1.2+ encryption, mutual certificate validation (mTLS), constant-time bearer token validation (`secrets.compare_digest`), and peer ID allowlists.
+4. **Message Integrity**: Optional HMAC-SHA256 signing of canonical JSON envelopes protects control and task messages against tampering.
+5. **Replay Attack Mitigation**: A sliding timestamp window (60s) and bounded in-memory cache of seen message IDs reject expired or replayed messages.
+6. **Denial-of-Service (DoS) Limits**: Wire framing strictly bounds message frames to 4 MiB (`max_frame_size`) and task payloads to 1 MiB (`max_payload_size`) to protect against memory exhaustion.
+7. **Key Management Best Practices**: Keep private keys (`*.key`) and shared secrets out of source control. Distribute credentials via environment variables (`MESHWEAVER_SHARED_SECRET`, `MESHWEAVER_AUTH_TOKEN`) or dedicated secret managers.
+
+---
+
+## Current Limitations
+
+- **At-Least-Once Execution Semantics**: When a worker fails mid-execution or drops its TCP connection, MeshWeaver's scheduler reassigns the task to alternate healthy candidates up to a bounded retry limit (`max_retries`). This provides **at-least-once execution semantics**; tasks may execute more than once if a worker dropped connection after completing computation. MeshWeaver explicitly does not guarantee exactly-once execution.
+- **Gossip Eventual Consistency**: Workload metrics (CPU, RAM, active tasks) are disseminated via periodic epidemic gossip rounds. Transient load changes between gossip intervals can cause short-term routing skew until the next synchronization cycle.
+- **In-Memory Volatility**: The core registry, DHT routing table, and gossip stores are memory-resident. Restarting a node clears its in-memory tables; nodes rebuild mesh state upon reconnecting to bootstrap seeds.
+
+---
+
+## Four-Week Implementation Roadmap
+
+MeshWeaver was built through 20 structured, verifiable milestone commits across four development phases:
+
+### Week 1 — Networking Foundation
+- [x] **Milestone 1 (Commit 1)**: Initialized zero-dependency package structure, Python 3.11+ type hints, and pytest configuration.
+- [x] **Milestone 2 (Commit 2)**: Built length-prefixed binary framing protocol, 10 MiB frame limits, and JSON message envelopes.
+- [x] **Milestone 3 (Commit 3)**: Implemented non-blocking async TCP stream handling, dynamic port binding, and handshake negotiation.
+- [x] **Milestone 4 (Commit 4)**: Created validated task schemas (`TaskRequest`, `TaskResponse`), registry, and code injection prevention.
+- [x] **Milestone 5 (Commit 5)**: Created two-peer communication demo and integration tests verifying handshake and task execution.
+
+### Week 2 — Discovery and Workload Sharing
+- [x] **Milestone 1 (Commit 6)**: Implemented dynamic peer registry with lifecycle state machine (`ACTIVE`, `STALE`, `EXPIRED`) and TTL pruning.
+- [x] **Milestone 2 (Commit 7)**: Built Kademlia-inspired DHT discovery, 160-bit SHA-1 keyspace, XOR distance metric, $k$-buckets, and iterative lookups.
+- [x] **Milestone 3 (Commit 8)**: Implemented epidemic gossip engine periodically sharing CPU, RAM, active task count, and node health.
+- [x] **Milestone 4 (Commit 9)**: Implemented gossip anti-amplification bounds (fanout, hop counters, monotonic timestamps, clock skew rejection).
+- [x] **Milestone 5 (Commit 10)**: Created `NodeStatusAPI`, structured snapshots, and multi-node discovery verification demo (`examples/multi_node.py`).
+
+### Week 3 — Task Execution and Reliability
+- [x] **Milestone 1 (Commit 11)**: Implemented standalone asynchronous task worker (`TaskWorker`), envelope validation, and timeout enforcement.
+- [x] **Milestone 2 (Commit 12)**: Built load-aware task scheduler (`TaskScheduler`) with composite scoring, XOR tie-breaking, and explainability.
+- [x] **Milestone 3 (Commit 13)**: Integrated decentralized task routing workflow, correlation ID tracking, and execution status queries.
+- [x] **Milestone 4 (Commit 14)**: Added active heartbeat monitoring (`HeartbeatMonitor`), health state transitions, fast disconnect detection, and bounded retry recovery.
+- [x] **Milestone 5 (Commit 15)**: Integrated full distributed workflow across heterogeneous workers with comprehensive recovery tests.
 
 ### Week 4 — Security, Monitoring, and Release Readiness
+- [x] **Milestone 1 (Commit 16)**: Implemented authenticated peer communication (TLS 1.2+, mTLS, HMAC-SHA256 signing, bearer token auth, replay protection, DoS bounds).
+- [x] **Milestone 2 (Commit 17)**: Created live interactive Rich terminal monitoring dashboard (`meshweaver monitor`) with plain-text ASCII fallback.
+- [x] **Milestone 3 (Commit 18)**: Finalized packaging metadata in `pyproject.toml`, console script entry point, configuration resolution, environment-variable hierarchy, and diagnostic startup errors.
+- [x] **Milestone 4 (Commit 19)**: Completed comprehensive documentation, Mermaid architecture diagrams, module breakdown, troubleshooting, and verified examples.
+- [ ] **Milestone 5 (Commit 20)**: Final release verification and web dashboard integration.
 
-- [x] **Peer security and authentication (Commit 16)**: Implemented configurable TLS with Python's standard `ssl` module, mutual TLS certificate validation, pre-shared bearer token authentication (`secrets.compare_digest`), peer ID allowlists, HMAC-SHA256 message signing/integrity, replay window protection, and 4 MiB frame / 1 MiB payload DoS bounds.
-- [x] **Rich-based CLI dashboard and monitoring commands (Commit 17)**: Implemented interactive terminal monitoring dashboard with Rich, CPU/RAM utilization and peer health reports, active and completed task inspection, plain-text ASCII fallback, and CLI commands (`start`, `peers`, `tasks`, `monitor`, `submit`).
-- [x] **Packaging, configuration, and CLI installation (Commit 18)**: Finalized `pyproject.toml` with metadata, installable CLI entrypoint (`meshweaver`), optional extras (`metrics`, `security`, `cli`, `all`), linters/formatters (`ruff`, `mypy`), and pytest settings. Added `meshweaver.example.json`, environment variable resolution (`MESHWEAVER_*`), strict priority hierarchy (CLI > ENV > File > Defaults), and clean startup error reporting.
-- [ ] **Web dashboard and REST/WebSocket API**: Peer and task visualization interface.
-- [ ] **Release readiness and final verification**: Finalize tests, documentation, and a reproducible demo.
+---
 
-## Development Principles
+## Contributing & License
 
-1. Implement one small, verifiable feature per commit.
-2. Run relevant tests before committing.
-3. Keep secrets, virtual environments, caches, and local data out of Git.
-4. Never claim a feature works unless it has been implemented and tested.
-5. Prefer small modules with clear responsibilities and type hints.
-6. Document limitations and design decisions honestly.
+Contributions, feedback, and experiment results are welcome. Please ensure that all changes include corresponding unit tests and maintain zero external runtime dependencies for the core package.
 
-## Example Commit Plan
-
-Use 20 meaningful commits across four weeks. The actual commit messages should describe the change that was completed, not a feature that is only planned. A suggested sequence is:
-
-- Week 1: repository setup, async protocol, peer client/server, message schema, tests.
-- Week 2: peer registry, DHT primitives, load metrics, gossip messages, multi-node tests.
-- Week 3: task lifecycle, routing policy, heartbeat monitor, retry/reassignment, reliability tests.
-- Week 4: security hardening, CLI commands, dashboard API, dashboard UI, documentation/demo.
-
-## Contributing
-
-This is currently a personal learning project. If you experiment with it, create a branch, make a focused change, run tests, and document the behavior and limitations.
-
-## Disclaimer
-
-MeshWeaver is an educational prototype. It is not intended to replace mature task queues or to run untrusted remote code in production.
-
-## License
-
-Choose a license before publishing or accepting contributions. For example, MIT is a permissive option, but only select it if it matches your intentions.
+MeshWeaver is distributed under the terms of the **MIT License**. See [LICENSE](LICENSE) for details.
