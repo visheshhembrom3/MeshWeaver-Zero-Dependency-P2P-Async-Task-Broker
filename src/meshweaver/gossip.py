@@ -347,9 +347,9 @@ class ResourceCollector:
         *,
         task_count_provider: Callable[[], int] | None = None,
         cpu_threshold_degraded: float = 80.0,
-        cpu_threshold_unhealthy: float = 95.0,
+        cpu_threshold_unhealthy: float = 99.0,
         memory_threshold_degraded: float = 85.0,
-        memory_threshold_unhealthy: float = 98.0,
+        memory_threshold_unhealthy: float = 99.0,
         custom_metrics_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.node_id: str = validate_peer_id(node_id)

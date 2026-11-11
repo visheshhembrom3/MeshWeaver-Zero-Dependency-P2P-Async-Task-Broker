@@ -816,3 +816,47 @@ async def test_end_to_end_load_aware_task_submission() -> None:
                 resp = await client.submit_task("add", 100, 250)
                 assert resp.status == TaskStatus.SUCCESS
                 assert resp.result == 350
+
+
+@pytest.mark.asyncio
+async def test_regression_heavy_load_worker_remains_degraded_and_eligible() -> None:
+    """
+    Regression test: High CPU (>95% but <99%) must classify worker as DEGRADED,
+    not UNHEALTHY. The worker must remain eligible for scheduling and execute tasks.
+    """
+    async with PeerNode(peer_id="worker-heavy-load", host="127.0.0.1", port=0) as worker:
+        async with PeerNode(peer_id="client-dispatcher", host="127.0.0.1", port=0) as client:
+            client.enable_gossip()
+            client.peer_registry.register(worker.peer_id, worker.host, worker.bound_port)
+
+            now = time.time()
+            # Worker under heavy CPU load (96.5% CPU, 90.0% MEM)
+            client.gossip_engine.store.update(
+                NodeResourceReport(
+                    node_id=worker.peer_id,
+                    timestamp=now,
+                    cpu_percent=96.5,
+                    memory_percent=90.0,
+                    active_task_count=0,
+                    health_status=HealthStatus.DEGRADED,
+                )
+            )
+
+            # Scheduler confirms worker is eligible with degraded penalty
+            evals = client.scheduler.explain()
+            assert len(evals) == 1
+            assert evals[0]["peer_id"] == "worker-heavy-load"
+            assert evals[0]["is_eligible"] is True
+            assert evals[0]["health_status"] == "degraded"
+            # Score = 0*10 + 96.5*0.5 + 90*0.5 + 50 (penalty) = 48.25 + 45.0 + 50.0 = 143.25
+            assert evals[0]["score"] == 143.25
+
+            best = client.scheduler.select_best_worker()
+            assert best is not None
+            assert best.peer_id == "worker-heavy-load"
+
+            # Submit task -> succeeds on degraded worker
+            resp = await client.submit_task("add", 40, 2)
+            assert resp.status == TaskStatus.SUCCESS
+            assert resp.result == 42
+
