@@ -78,7 +78,7 @@ async def run_remote_tasks_demo(
 
     def log_print(text: str = "") -> None:
         if not quiet and not as_json:
-            print(text)
+            print(text, flush=True)
 
     log_print("=" * 80)
     log_print("MeshWeaver: End-to-End Remote Task Submission and Execution")
@@ -307,7 +307,7 @@ async def run_remote_tasks_demo(
         log_print(f"   [Worker 1] {worker_1.peer_id} stopped (simulating worker crash/offline).")
 
         # Submit task with Worker 1 stopped: router fails over to Worker 2
-        resp_failover = await client.submit_task("add", 999, 1, retry_on_failure=True)
+        resp_failover = await client.submit_task("add", 999, 1, retry_on_failure=True, max_retries=3)
         log_print(
             f"   Task dispatched during failover -> Result: {resp_failover.result} "
             f"(Status: {resp_failover.status.value})"

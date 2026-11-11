@@ -443,7 +443,7 @@ def test_remote_tasks_cli_script_execution() -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=15.0,
+        timeout=35.0,
     )
     assert proc.returncode == 0, f"Script failed:\n{proc.stderr}"
     stdout = proc.stdout

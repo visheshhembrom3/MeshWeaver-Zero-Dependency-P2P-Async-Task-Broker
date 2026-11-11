@@ -34,10 +34,9 @@ export const Settings: React.FC<SettingsProps> = ({
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [configInfo, setConfigInfo] = useState<NodeConfigInfo | null>(null);
-  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(false);
+  const [isLoadingConfig, setIsLoadingConfig] = useState<boolean>(true);
 
   useEffect(() => {
-    setIsLoadingConfig(true);
     api
       .getConfig()
       .then((cfg) => setConfigInfo(cfg))

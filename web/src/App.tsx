@@ -72,10 +72,7 @@ export const App: React.FC = () => {
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Fetch all backend data
-  const loadAllData = useCallback(async (isSilent = false) => {
-    if (!isSilent) setIsRefreshing(true);
-    setErrorMessage(null);
-
+  const loadAllData = useCallback(async () => {
     try {
       const [
         nodeData,
@@ -100,6 +97,7 @@ export const App: React.FC = () => {
       setMetrics(metricsData);
       setAvailableTasks(availData);
       setIsConnected(true);
+      setErrorMessage(null);
       setLastUpdated(new Date());
     } catch (err) {
       setIsConnected(false);
@@ -112,9 +110,17 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const handleManualRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    await loadAllData();
+  }, [loadAllData]);
+
   // Initial load
   useEffect(() => {
-    loadAllData();
+    const timer = setTimeout(() => {
+      void loadAllData();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [loadAllData]);
 
   // WebSocket Live Subscription
@@ -128,7 +134,7 @@ export const App: React.FC = () => {
 
         // If a task or peer event arrived, silently refresh tasks/peers
         if (newEv.event_type.startsWith('task_') || newEv.event_type.startsWith('peer_')) {
-          loadAllData(true);
+          loadAllData();
         }
       } else if (msg.type === 'heartbeat') {
         setIsConnected(true);
@@ -149,7 +155,7 @@ export const App: React.FC = () => {
 
     if (refreshInterval > 0) {
       refreshTimerRef.current = setInterval(() => {
-        loadAllData(true);
+        loadAllData();
       }, refreshInterval);
     }
 
@@ -185,7 +191,7 @@ export const App: React.FC = () => {
           currentPage={currentPage}
           onOpenMobileSidebar={() => setIsMobileSidebarOpen(true)}
           isConnected={isConnected}
-          onRefresh={() => loadAllData(false)}
+          onRefresh={handleManualRefresh}
           isRefreshing={isRefreshing}
           lastUpdated={lastUpdated}
           activePeersCount={peers.filter((p) => p.state === 'active' && !p.is_unresponsive).length}
@@ -203,7 +209,7 @@ export const App: React.FC = () => {
               </span>
             </div>
             <button
-              onClick={() => loadAllData(false)}
+              onClick={handleManualRefresh}
               className="px-2.5 py-1 bg-white dark:bg-slate-800 border border-rose-200 dark:border-rose-800 rounded font-medium text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-slate-700 transition shrink-0 ml-4 flex items-center gap-1"
             >
               <RefreshCw className="w-3 h-3" /> Retry
@@ -246,7 +252,7 @@ export const App: React.FC = () => {
               {currentPage === 'peers' && (
                 <Peers
                   peers={peers}
-                  onRefresh={() => loadAllData(false)}
+                  onRefresh={handleManualRefresh}
                   isRefreshing={isRefreshing}
                 />
               )}
@@ -255,7 +261,7 @@ export const App: React.FC = () => {
                 <Tasks
                   tasks={tasks}
                   availableTasks={availableTasks}
-                  onRefresh={() => loadAllData(false)}
+                  onRefresh={handleManualRefresh}
                   isRefreshing={isRefreshing}
                   onNavigateToDetails={handleNavigateToTaskDetails}
                 />
@@ -266,7 +272,7 @@ export const App: React.FC = () => {
                   tasks={tasks}
                   selectedTaskId={selectedTaskIdForDetails}
                   onSelectTask={(id) => setSelectedTaskIdForDetails(id)}
-                  onRefresh={() => loadAllData(false)}
+                  onRefresh={handleManualRefresh}
                   isRefreshing={isRefreshing}
                 />
               )}
@@ -280,7 +286,7 @@ export const App: React.FC = () => {
               {currentPage === 'events' && (
                 <Events
                   events={events}
-                  onRefresh={() => loadAllData(false)}
+                  onRefresh={handleManualRefresh}
                   isRefreshing={isRefreshing}
                 />
               )}
@@ -290,7 +296,7 @@ export const App: React.FC = () => {
                   nodeStatus={nodeStatus}
                   refreshInterval={refreshInterval}
                   onSetRefreshInterval={setRefreshInterval}
-                  onRefreshAll={() => loadAllData(false)}
+                  onRefreshAll={handleManualRefresh}
                   theme={theme}
                   onSetTheme={setTheme}
                 />

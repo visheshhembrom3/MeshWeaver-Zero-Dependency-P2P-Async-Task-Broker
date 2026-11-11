@@ -32,36 +32,19 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
   onRefresh,
   isRefreshing,
 }) => {
-  const [activeTaskId, setActiveTaskId] = useState<string>(initialTaskId || (tasks[0]?.task_id ?? ''));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const activeTaskId = selectedId ?? initialTaskId ?? (tasks[0]?.task_id ?? '');
+
   const [taskDetail, setTaskDetail] = useState<TaskRecord | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [copiedResult, setCopiedResult] = useState<boolean>(false);
 
-  // Sync if prop changes
-  useEffect(() => {
-    if (initialTaskId) {
-      setActiveTaskId(initialTaskId);
-    }
-  }, [initialTaskId]);
-
-  // If no task selected yet and tasks available, pick first
-  useEffect(() => {
-    if (!activeTaskId && tasks.length > 0) {
-      setActiveTaskId(tasks[0].task_id);
-    }
-  }, [activeTaskId, tasks]);
-
   // Fetch full details whenever activeTaskId changes
   useEffect(() => {
-    if (!activeTaskId) {
-      setTaskDetail(null);
-      return;
-    }
+    if (!activeTaskId) return;
 
     let isMounted = true;
-    setIsLoadingDetail(true);
-
     api
       .getTask(activeTaskId)
       .then((detail) => {
@@ -128,7 +111,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
           <select
             value={activeTaskId}
             onChange={(e) => {
-              setActiveTaskId(e.target.value);
+              setSelectedId(e.target.value);
               onSelectTask?.(e.target.value);
             }}
             className="text-xs font-mono py-1.5 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-hidden focus:ring-2 focus:ring-blue-500 max-w-xs truncate"
@@ -171,7 +154,7 @@ export const TaskDetails: React.FC<TaskDetailsProps> = ({
                 <div
                   key={t.task_id}
                   onClick={() => {
-                    setActiveTaskId(t.task_id);
+                    setSelectedId(t.task_id);
                     onSelectTask?.(t.task_id);
                   }}
                   className={`p-3 rounded-lg cursor-pointer transition text-xs ${

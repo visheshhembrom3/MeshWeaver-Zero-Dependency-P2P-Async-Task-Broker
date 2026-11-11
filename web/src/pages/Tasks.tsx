@@ -46,12 +46,11 @@ export const Tasks: React.FC<TasksProps> = ({
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [lastSubmittedResult, setLastSubmittedResult] = useState<Record<string, unknown> | null>(null);
 
-  // Set default selected task name when available tasks arrive
-  React.useEffect(() => {
-    if (availableTasks.length > 0 && !availableTasks.some((t) => t.name === selectedTaskName)) {
-      setSelectedTaskName(availableTasks[0].name);
-    }
-  }, [availableTasks, selectedTaskName]);
+  // Derive valid task name from available tasks without unnecessary effect
+  const activeTaskName =
+    availableTasks.length > 0 && !availableTasks.some((t) => t.name === selectedTaskName)
+      ? availableTasks[0].name
+      : selectedTaskName;
 
   const filteredTasks = tasks.filter((t) => {
     const matchesSearch =
@@ -77,7 +76,7 @@ export const Tasks: React.FC<TasksProps> = ({
 
     // Prepare parsed safe JSON arguments based on task function
     let taskArgs: unknown[] = [];
-    if (selectedTaskName === 'add') {
+    if (activeTaskName === 'add') {
       const num1 = Number(arg1);
       const num2 = Number(arg2);
       if (isNaN(num1) || isNaN(num2)) {
@@ -86,16 +85,16 @@ export const Tasks: React.FC<TasksProps> = ({
         return;
       }
       taskArgs = [num1, num2];
-    } else if (selectedTaskName === 'reverse_string') {
+    } else if (activeTaskName === 'reverse_string') {
       taskArgs = [strArg];
-    } else if (selectedTaskName === 'echo') {
+    } else if (activeTaskName === 'echo') {
       taskArgs = [strArg, 42];
-    } else if (selectedTaskName === 'ping') {
+    } else if (activeTaskName === 'ping') {
       taskArgs = [];
     }
 
     const payload: TaskSubmitPayload = {
-      task_name: selectedTaskName,
+      task_name: activeTaskName,
       args: taskArgs,
       kwargs: {},
       timeout: timeoutSec,
@@ -294,7 +293,7 @@ export const Tasks: React.FC<TasksProps> = ({
                   Registered Task Function (Allowlist Only)
                 </label>
                 <select
-                  value={selectedTaskName}
+                  value={activeTaskName}
                   onChange={(e) => setSelectedTaskName(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 font-mono font-medium focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                 >
@@ -311,7 +310,7 @@ export const Tasks: React.FC<TasksProps> = ({
               </div>
 
               {/* Dynamic Arguments Form based on function */}
-              {selectedTaskName === 'add' && (
+              {activeTaskName === 'add' && (
                 <div className="grid grid-cols-2 gap-3 p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
@@ -340,7 +339,7 @@ export const Tasks: React.FC<TasksProps> = ({
                 </div>
               )}
 
-              {(selectedTaskName === 'reverse_string' || selectedTaskName === 'echo') && (
+              {(activeTaskName === 'reverse_string' || activeTaskName === 'echo') && (
                 <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700">
                   <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
                     Input String
@@ -355,7 +354,7 @@ export const Tasks: React.FC<TasksProps> = ({
                 </div>
               )}
 
-              {selectedTaskName === 'ping' && (
+              {activeTaskName === 'ping' && (
                 <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-400">
                   The <code className="text-blue-600 dark:text-blue-400">ping</code> task verifies connectivity with worker nodes and expects no parameters. Returns <code className="text-emerald-600 dark:text-emerald-400">"pong"</code>.
                 </div>
