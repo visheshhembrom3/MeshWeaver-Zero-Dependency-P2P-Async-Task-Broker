@@ -18,6 +18,7 @@ import {
   Bar,
 } from 'recharts';
 import type { MeshEvent, NodeStatus, PeerStatus, SystemMetrics, TaskRecord } from '../types';
+import type { PageId } from '../components/Sidebar';
 import { StatusBadge } from '../components/StatusBadge';
 
 interface OverviewProps {
@@ -26,7 +27,7 @@ interface OverviewProps {
   tasks: TaskRecord[];
   events: MeshEvent[];
   metrics: SystemMetrics | null;
-  onNavigate: (pageId: 'topology' | 'peers' | 'tasks' | 'monitoring' | 'events') => void;
+  onNavigate: (pageId: PageId, taskId?: string) => void;
 }
 
 export const Overview: React.FC<OverviewProps> = ({
@@ -39,6 +40,9 @@ export const Overview: React.FC<OverviewProps> = ({
 }) => {
   const activePeers = peers.filter(
     (p) => p.state === 'active' && !p.is_unresponsive
+  );
+  const healthyPeers = peers.filter(
+    (p) => p.health_status === 'healthy' && !p.is_unresponsive
   );
   const unresponsivePeers = peers.filter(
     (p) => p.is_unresponsive || p.state === 'unresponsive' || p.state === 'expired'
@@ -83,22 +87,22 @@ export const Overview: React.FC<OverviewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner / System Status */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600">
+          <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
             <Activity className="w-6 h-6" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-slate-900">
+              <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
                 P2P Mesh Coordinator
               </h2>
               <StatusBadge status={nodeStatus?.is_running ? 'active' : 'unresponsive'} size="sm" />
             </div>
-            <p className="text-xs text-slate-500 mt-0.5 font-mono">
-              Node: <span className="text-slate-800 font-semibold">{nodeStatus?.node_id || 'Initializing...'}</span> |{' '}
-              Port: <span className="text-slate-800 font-semibold">{nodeStatus?.bound_port || 'N/A'}</span> |{' '}
-              DHT ID: <span className="text-slate-800 font-semibold">{nodeStatus?.dht_id_hex?.slice(0, 12) || 'N/A'}...</span>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
+              Node: <span className="text-slate-800 dark:text-slate-200 font-semibold">{nodeStatus?.node_id || 'Initializing...'}</span> |{' '}
+              Port: <span className="text-slate-800 dark:text-slate-200 font-semibold">{nodeStatus?.bound_port || 'N/A'}</span> |{' '}
+              DHT ID: <span className="text-slate-800 dark:text-slate-200 font-semibold">{nodeStatus?.dht_id_hex?.slice(0, 12) || 'N/A'}...</span>
             </p>
           </div>
         </div>
@@ -106,14 +110,14 @@ export const Overview: React.FC<OverviewProps> = ({
         <div className="flex items-center gap-2 text-xs">
           <button
             onClick={() => onNavigate('tasks')}
-            className="px-3.5 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition flex items-center gap-1.5 shadow-xs"
+            className="px-3.5 py-2 bg-blue-600 dark:bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 transition flex items-center gap-1.5 shadow-xs"
           >
             <span>Submit Task</span>
             <ArrowUpRight className="w-4 h-4" />
           </button>
           <button
             onClick={() => onNavigate('topology')}
-            className="px-3.5 py-2 bg-slate-50 text-slate-700 font-medium border border-slate-200 rounded-lg hover:bg-slate-100 transition flex items-center gap-1.5 shadow-xs"
+            className="px-3.5 py-2 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700/60 transition flex items-center gap-1.5 shadow-xs"
           >
             <span>Inspect Topology</span>
           </button>
@@ -122,30 +126,30 @@ export const Overview: React.FC<OverviewProps> = ({
 
       {/* Primary KPI Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Active Peers */}
+        {/* Total & Healthy Peers */}
         <div
           onClick={() => onNavigate('peers')}
-          className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs hover:border-blue-300 transition cursor-pointer"
+          className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition cursor-pointer"
         >
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Active Peers
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              Mesh Peers
             </span>
-            <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
+            <div className="p-2 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 rounded-lg">
               <Users className="w-4 h-4" />
             </div>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900">
-              {activePeers.length}
+            <span className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              {peers.length}
             </span>
-            <span className="text-xs text-slate-500">
-              / {peers.length} registered
+            <span className="text-xs text-emerald-600 dark:text-emerald-400 font-semibold">
+              {healthyPeers.length} healthy ({activePeers.length} active)
             </span>
           </div>
-          <div className="mt-3 text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-2">
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-2">
             <span>Unresponsive:</span>
-            <span className={unresponsivePeers.length > 0 ? 'text-rose-600 font-semibold' : 'text-slate-700'}>
+            <span className={unresponsivePeers.length > 0 ? 'text-rose-600 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-slate-300'}>
               {unresponsivePeers.length}
             </span>
           </div>
@@ -154,56 +158,56 @@ export const Overview: React.FC<OverviewProps> = ({
         {/* Running & Pending Tasks */}
         <div
           onClick={() => onNavigate('tasks')}
-          className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs hover:border-blue-300 transition cursor-pointer"
+          className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition cursor-pointer"
         >
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               In-Flight Tasks
             </span>
-            <div className="p-2 bg-amber-50 text-amber-600 rounded-lg">
+            <div className="p-2 bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 rounded-lg">
               <Clock className="w-4 h-4" />
             </div>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900">
+            <span className="text-2xl font-bold text-slate-900 dark:text-slate-100">
               {runningTasks.length}
             </span>
-            <span className="text-xs text-amber-600 font-medium">
+            <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">
               running ({pendingTasks.length} queued)
             </span>
           </div>
-          <div className="mt-3 text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-2">
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-2">
             <span>Max Concurrency:</span>
-            <span className="text-slate-700 font-semibold">
+            <span className="text-slate-700 dark:text-slate-300 font-semibold">
               {nodeStatus?.max_concurrency || 4} slots
             </span>
           </div>
         </div>
 
-        {/* Completed Tasks */}
+        {/* Completed & Failed Tasks */}
         <div
           onClick={() => onNavigate('tasks')}
-          className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs hover:border-blue-300 transition cursor-pointer"
+          className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition cursor-pointer"
         >
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               Completed Tasks
             </span>
-            <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
+            <div className="p-2 bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 rounded-lg">
               <CheckCircle2 className="w-4 h-4" />
             </div>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900">
+            <span className="text-2xl font-bold text-slate-900 dark:text-slate-100">
               {completedTasks.length}
             </span>
-            <span className="text-xs text-emerald-600 font-medium">
+            <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
               {metrics ? `${metrics.tasks.success_rate}% success` : '100%'}
             </span>
           </div>
-          <div className="mt-3 text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-2">
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-2">
             <span>Failed / Errors:</span>
-            <span className={failedTasks.length > 0 ? 'text-rose-600 font-semibold' : 'text-slate-700'}>
+            <span className={failedTasks.length > 0 ? 'text-rose-600 dark:text-rose-400 font-semibold' : 'text-slate-700 dark:text-slate-300'}>
               {failedTasks.length}
             </span>
           </div>
@@ -212,27 +216,27 @@ export const Overview: React.FC<OverviewProps> = ({
         {/* DHT Routing Contacts */}
         <div
           onClick={() => onNavigate('topology')}
-          className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs hover:border-blue-300 transition cursor-pointer"
+          className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition cursor-pointer"
         >
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               DHT Contacts
             </span>
-            <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+            <div className="p-2 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 rounded-lg">
               <Layers className="w-4 h-4" />
             </div>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900">
+            <span className="text-2xl font-bold text-slate-900 dark:text-slate-100">
               {nodeStatus?.routing_table_contacts || 0}
             </span>
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-slate-500 dark:text-slate-400">
               K-Bucket entries
             </span>
           </div>
-          <div className="mt-3 text-xs text-slate-500 flex items-center justify-between border-t border-slate-100 pt-2">
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-2">
             <span>Gossip Reports:</span>
-            <span className="text-slate-700 font-semibold">
+            <span className="text-slate-700 dark:text-slate-300 font-semibold">
               {nodeStatus?.gossip_reports_count || 0}
             </span>
           </div>
@@ -242,21 +246,21 @@ export const Overview: React.FC<OverviewProps> = ({
       {/* Visual Charts Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Task Duration Telemetry */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
                 Recent Task Execution Durations (ms)
               </h3>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 Actual measured execution time per task across workers
               </p>
             </div>
             <TrendingUp className="w-4 h-4 text-slate-400" />
           </div>
           {taskDurationData.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-xs text-slate-400">
-              No task executions recorded yet. Submit a task to view real duration metrics.
+            <div className="h-48 flex items-center justify-center text-xs text-slate-400 dark:text-slate-500">
+              No task executions recorded yet. Submit an allowlisted task to view real duration metrics.
             </div>
           ) : (
             <div className="h-48 w-full">
@@ -266,8 +270,8 @@ export const Overview: React.FC<OverviewProps> = ({
                   <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#E2E8F0',
+                      backgroundColor: 'var(--card-bg, #FFFFFF)',
+                      borderColor: 'var(--border-color, #E2E8F0)',
                       borderRadius: '0.5rem',
                       fontSize: '12px',
                     }}
@@ -281,20 +285,20 @@ export const Overview: React.FC<OverviewProps> = ({
         </div>
 
         {/* Peer Resource Utilization Preview */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
                 Peer Workload & CPU Utilization (%)
               </h3>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 Live CPU and RAM consumption via gossip reports
               </p>
             </div>
             <Activity className="w-4 h-4 text-slate-400" />
           </div>
           {peerLoadData.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-xs text-slate-400">
+            <div className="h-48 flex items-center justify-center text-xs text-slate-400 dark:text-slate-500">
               No peer load reports received yet. Active peers will appear as gossip propagates.
             </div>
           ) : (
@@ -305,14 +309,14 @@ export const Overview: React.FC<OverviewProps> = ({
                   <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} domain={[0, 100]} />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#E2E8F0',
+                      backgroundColor: 'var(--card-bg, #FFFFFF)',
+                      borderColor: 'var(--border-color, #E2E8F0)',
                       borderRadius: '0.5rem',
                       fontSize: '12px',
                     }}
                   />
                   <Bar dataKey="cpu" fill="#2563EB" radius={[4, 4, 0, 0]} name="CPU %" />
-                  <Bar dataKey="memory" fill="#93C5FD" radius={[4, 4, 0, 0]} name="RAM %" />
+                  <Bar dataKey="memory" fill="#818CF8" radius={[4, 4, 0, 0]} name="RAM %" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -323,42 +327,55 @@ export const Overview: React.FC<OverviewProps> = ({
       {/* Lower Dual Tables: Recent Tasks & Live System Events */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recent Tasks */}
-        <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs overflow-hidden">
+          <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
               Recent Task Activity
             </h3>
             <button
               onClick={() => onNavigate('tasks')}
-              className="text-xs font-semibold text-blue-600 hover:text-blue-800"
+              className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
             >
               View all ({tasks.length})
             </button>
           </div>
           {tasks.length === 0 ? (
-            <div className="p-8 text-center text-xs text-slate-400">
+            <div className="p-8 text-center text-xs text-slate-400 dark:text-slate-500">
               No tasks have been submitted yet.
             </div>
           ) : (
-            <div className="divide-y divide-slate-100">
+            <div className="divide-y divide-slate-100 dark:divide-slate-800/60">
               {tasks.slice(0, 5).map((t) => (
-                <div key={t.task_id} className="p-3.5 px-4 flex items-center justify-between text-xs hover:bg-slate-50 transition">
+                <div
+                  key={t.task_id}
+                  onClick={() => onNavigate('task-details', t.task_id)}
+                  className="p-3.5 px-4 flex items-center justify-between text-xs hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition"
+                >
                   <div className="min-w-0 pr-2">
-                    <div className="font-semibold text-slate-900 truncate">
-                      {t.task_name}
-                      <span className="ml-2 font-mono text-[11px] text-slate-400 font-normal">
+                    <div className="font-semibold text-slate-900 dark:text-slate-100 truncate flex items-center gap-1.5">
+                      <span>{t.task_name}</span>
+                      <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500 font-normal">
                         ({t.task_id.slice(0, 8)}...)
                       </span>
                     </div>
-                    <div className="text-slate-500 text-[11px] mt-0.5">
-                      Worker: <span className="font-medium text-slate-700">{t.routed_to || 'Local Node'}</span>
+                    <div className="text-slate-500 dark:text-slate-400 text-[11px] mt-0.5">
+                      Worker: <span className="font-medium text-slate-700 dark:text-slate-300">{t.routed_to || 'Local Node'}</span>
                       {t.execution_time != null && (
-                        <span className="ml-2">({(t.execution_time * 1000).toFixed(1)} ms)</span>
+                        <span className="ml-2 font-mono">({(t.execution_time * 1000).toFixed(1)} ms)</span>
                       )}
                     </div>
                   </div>
-                  <div>
+                  <div className="flex items-center gap-2">
                     <StatusBadge status={t.status} size="sm" />
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onNavigate('task-details', t.task_id);
+                      }}
+                      className="px-2 py-0.5 text-[11px] text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded transition"
+                    >
+                      Inspect
+                    </button>
                   </div>
                 </div>
               ))}
@@ -367,26 +384,26 @@ export const Overview: React.FC<OverviewProps> = ({
         </div>
 
         {/* Live System Events */}
-        <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-900">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs overflow-hidden">
+          <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
               Recent System Events
             </h3>
             <button
               onClick={() => onNavigate('events')}
-              className="text-xs font-semibold text-blue-600 hover:text-blue-800"
+              className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline"
             >
               View event log ({events.length})
             </button>
           </div>
           {events.length === 0 ? (
-            <div className="p-8 text-center text-xs text-slate-400">
+            <div className="p-8 text-center text-xs text-slate-400 dark:text-slate-500">
               No events recorded yet.
             </div>
           ) : (
-            <div className="divide-y divide-slate-100">
+            <div className="divide-y divide-slate-100 dark:divide-slate-800/60">
               {events.slice(0, 5).map((ev) => (
-                <div key={ev.id} className="p-3.5 px-4 flex items-start gap-3 text-xs hover:bg-slate-50 transition">
+                <div key={ev.id} className="p-3.5 px-4 flex items-start gap-3 text-xs hover:bg-slate-50 dark:hover:bg-slate-800/50 transition">
                   <div className="mt-0.5">
                     {ev.severity === 'error' ? (
                       <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
@@ -399,13 +416,13 @@ export const Overview: React.FC<OverviewProps> = ({
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-slate-800 font-medium truncate">
+                    <p className="text-slate-800 dark:text-slate-200 font-medium truncate">
                       {ev.message}
                     </p>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
                       {new Date(ev.timestamp * 1000).toLocaleTimeString()}
                       {ev.peer_id && (
-                        <span className="ml-1.5 font-mono text-slate-500">[{ev.peer_id}]</span>
+                        <span className="ml-1.5 font-mono text-slate-500 dark:text-slate-400">[{ev.peer_id}]</span>
                       )}
                     </p>
                   </div>

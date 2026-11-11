@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import logging
+import os
 from pathlib import Path
 import time
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -24,12 +27,16 @@ from meshweaver.network import PeerNode
 
 logger = logging.getLogger(__name__)
 
+# Maximum allowed size for raw task argument strings or JSON payloads (64 KB)
+MAX_TASK_ARG_LENGTH = 65536
+MAX_TASK_ARGS_COUNT = 50
+
 
 class TaskSubmitRequest(BaseModel):
     """Validated payload for submitting a task to the mesh."""
 
-    task_name: str = Field(..., description="Allowlisted task name (e.g. add, reverse_string, echo, ping)")
-    args: list[Any] = Field(default_factory=list, description="Positional arguments for the task handler")
+    task_name: str = Field(..., max_length=128, description="Allowlisted task name (e.g. add, reverse_string, echo, ping)")
+    args: list[Any] = Field(default_factory=list, max_items=MAX_TASK_ARGS_COUNT, description="Positional arguments for the task handler")
     kwargs: dict[str, Any] = Field(default_factory=dict, description="Keyword arguments for the task handler")
     timeout: float = Field(default=5.0, ge=0.1, le=120.0, description="Task execution timeout in seconds")
     require_ack: bool = Field(default=True, description="Whether to require worker acknowledgement")
@@ -39,14 +46,49 @@ def create_api_app(
     node: PeerNode,
     event_manager: EventManager | None = None,
     static_dist_dir: str | Path | None = None,
+    api_key: str | None = None,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application bound to a running PeerNode instance.
+
+    :param node: Running PeerNode instance to manage and inspect.
+    :param event_manager: EventManager for broadcasting network events.
+    :param static_dist_dir: Optional path to pre-built React frontend assets.
+    :param api_key: Optional secret key required for privileged endpoints (e.g. task submission).
+                    Can also be configured via MESHOPS_API_KEY environment variable.
     """
     events = event_manager if event_manager is not None else EventManager()
     known_peer_ids: set[str] = set()
     start_time = time.time()
     sync_task: asyncio.Task[None] | None = None
+
+    # Resolve configured API Key (from argument or environment)
+    configured_api_key = api_key or os.environ.get("MESHOPS_API_KEY") or os.environ.get("MESHWEAVER_API_KEY")
+
+    api_key_header_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+    async def verify_privileged_access(
+        x_api_key: str | None = Security(api_key_header_scheme),
+        authorization: str | None = Header(default=None),
+    ) -> None:
+        """
+        Verify that privileged operations provide the expected API key when configured.
+        Supports 'X-API-Key: <key>' or 'Authorization: Bearer <key>'.
+        """
+        if not configured_api_key:
+            return  # Open mode when no key configured
+
+        provided = x_api_key
+        if not provided and authorization:
+            parts = authorization.split()
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                provided = parts[1]
+
+        if not provided or provided != configured_api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized: Valid API key required for privileged operations. Provide X-API-Key or Authorization Bearer header.",
+            )
 
     # Wire up heartbeat failure & recovery hooks
     def _on_peer_unresponsive(peer_id: str, state: Any) -> None:
@@ -358,18 +400,37 @@ def create_api_app(
                 t_status = rec.get("status")
                 t_status_str = t_status.value if hasattr(t_status, "value") else str(t_status)
 
+                # Calculate transition timeline and execution breakdown
+                submitted_ts = rec.get("timestamp") or 0.0
+                completed_ts = rec.get("completed_at")
+                ack_ts = ack.timestamp if ack and hasattr(ack, "timestamp") else None
+                transitions = [
+                    {"state": "submitted", "timestamp": submitted_ts, "label": "Task Submitted to Broker"},
+                ]
+                if ack_ts:
+                    transitions.append({"state": "acknowledged", "timestamp": ack_ts, "label": f"Worker Acknowledged ({ack.worker_id if hasattr(ack, 'worker_id') else 'peer'})"})
+                if completed_ts:
+                    transitions.append({
+                        "state": t_status_str,
+                        "timestamp": completed_ts,
+                        "label": f"Execution {t_status_str.capitalize()}",
+                    })
+
                 return {
                     "task_id": task_id,
                     "correlation_id": rec.get("correlation_id"),
                     "task_name": rec.get("task_name") or (resp.metadata.get("task_name") if resp else "unknown"),
                     "status": t_status_str,
-                    "routed_to": rec.get("routed_to"),
-                    "timestamp": rec.get("timestamp"),
-                    "completed_at": rec.get("completed_at"),
+                    "routed_to": rec.get("routed_to") or (resp.metadata.get("worker") if resp else "Local Node"),
+                    "timestamp": submitted_ts,
+                    "completed_at": completed_ts,
                     "result": resp.result if resp else None,
                     "error": resp.error.to_dict() if resp and resp.error else None,
                     "execution_time": resp.execution_time if resp else None,
-                    "ownership": ownership.to_dict() if ownership else None,
+                    "retry_count": ownership.retry_count if ownership else 0,
+                    "max_retries": ownership.max_retries if ownership else 2,
+                    "worker_history": ownership.worker_history if ownership else ([rec.get("routed_to")] if rec.get("routed_to") else []),
+                    "transitions": transitions,
                     "ack": ack.to_dict() if ack and hasattr(ack, "to_dict") else None,
                 }
 
@@ -377,31 +438,40 @@ def create_api_app(
         if hasattr(node, "execution_engine") and node.execution_engine:
             erec = node.execution_engine.get_task(task_id)
             if erec is not None:
+                sub_ts = erec.submitted_at or 0.0
+                comp_ts = erec.completed_at
+                status_val = erec.state.value if hasattr(erec.state, "value") else str(erec.state)
+                transitions = [
+                    {"state": "submitted", "timestamp": sub_ts, "label": "Task Submitted to Local Worker"},
+                ]
+                if comp_ts:
+                    transitions.append({
+                        "state": status_val,
+                        "timestamp": comp_ts,
+                        "label": f"Execution {status_val.capitalize()}",
+                    })
+
                 return {
                     "task_id": task_id,
                     "correlation_id": erec.correlation_id,
                     "task_name": erec.request.task_name if erec.request else "unknown",
-                    "status": erec.state.value if hasattr(erec.state, "value") else str(erec.state),
+                    "status": status_val,
                     "routed_to": node.peer_id,
-                    "timestamp": erec.submitted_at,
-                    "completed_at": erec.completed_at,
+                    "timestamp": sub_ts,
+                    "completed_at": comp_ts,
                     "result": erec.response.result if erec.response else None,
                     "error": erec.response.error.to_dict() if erec.response and erec.response.error else None,
                     "execution_time": erec.execution_time,
-                    "ownership": {
-                        "task_id": task_id,
-                        "owner_id": node.peer_id,
-                        "assigned_worker_id": node.peer_id,
-                        "retry_count": 0,
-                        "max_retries": 2,
-                        "status": "completed" if erec.is_completed else "running",
-                    },
+                    "retry_count": 0,
+                    "max_retries": 2,
+                    "worker_history": [node.peer_id],
+                    "transitions": transitions,
                     "ack": None,
                 }
 
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
 
-    @app.post("/api/tasks")
+    @app.post("/api/tasks", dependencies=[Depends(verify_privileged_access)])
     async def submit_task(req: TaskSubmitRequest) -> dict[str, Any]:
         """
         Submit a task for asynchronous execution across the mesh.
@@ -409,6 +479,8 @@ def create_api_app(
         SECURITY GUARANTEE:
         Only tasks registered in TaskRegistry are permitted.
         Arbitrary code execution, arbitrary imports, and untrusted pickling are strictly blocked.
+        Enforces argument size limits and JSON serializability.
+        Requires valid API key when configured.
         """
         # Security Allowlist Verification
         available_tasks = node.task_registry.list_tasks()
@@ -416,6 +488,29 @@ def create_api_app(
             raise HTTPException(
                 status_code=400,
                 detail=f"Task '{req.task_name}' is not allowed. Must be one of: {available_tasks}",
+            )
+
+        # Enforce argument size limits
+        for idx, arg in enumerate(req.args):
+            if isinstance(arg, str) and len(arg) > MAX_TASK_ARG_LENGTH:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Argument at index {idx} exceeds maximum length of {MAX_TASK_ARG_LENGTH} characters",
+                )
+        for key, val in req.kwargs.items():
+            if isinstance(val, str) and len(val) > MAX_TASK_ARG_LENGTH:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Keyword argument '{key}' exceeds maximum length of {MAX_TASK_ARG_LENGTH} characters",
+                )
+
+        # Verify JSON serializability of payload
+        try:
+            json.dumps({"args": req.args, "kwargs": req.kwargs})
+        except (TypeError, ValueError) as json_err:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task arguments must be valid JSON-serializable values: {json_err}",
             )
 
         events.record_event(
@@ -569,6 +664,78 @@ def create_api_app(
             peer_id=peer_id,
         )
         return [e.to_dict() for e in events_list]
+
+    @app.get("/api/config")
+    async def get_node_config() -> dict[str, Any]:
+        """
+        Expose only genuine supported node settings with explicit restart requirements.
+        Never exposes private keys, passwords, or pre-shared secret values.
+        """
+        sec = (
+            getattr(node, "security_config", None)
+            or (node.security_manager.config if hasattr(node, "security_manager") and node.security_manager else None)
+        )
+        tls_enabled = bool(sec and sec.tls and sec.tls.enabled)
+        has_auth_token = bool(sec and sec.auth_token)
+        has_shared_secret = bool(sec and sec.shared_secret)
+        allowed_peers_count = len(sec.allowed_peers) if (sec and sec.allowed_peers) else 0
+
+        max_conc = (
+            node.execution_engine.max_concurrency
+            if hasattr(node, "execution_engine") and node.execution_engine
+            else 4
+        )
+
+        return {
+            "node_identity": {
+                "node_id": node.peer_id,
+                "dht_id_hex": node.node_id.hex if hasattr(node.node_id, "hex") else str(node.node_id),
+                "requires_restart": True,
+                "description": "Unique cryptographic identifier in the 160-bit Kademlia DHT space",
+            },
+            "network": {
+                "host": node.host,
+                "port": node.port,
+                "bound_port": node.bound_port,
+                "requires_restart": True,
+                "description": "TCP socket interface and port for peer-to-peer binary frame communication",
+            },
+            "heartbeat": {
+                "enabled": node.heartbeat_monitor.is_running,
+                "interval_seconds": node.heartbeat_monitor.interval,
+                "missed_threshold": node.heartbeat_monitor.missed_threshold,
+                "requires_restart": True,
+                "description": "Active probe cadence and failure count before peer is marked unresponsive",
+            },
+            "gossip": {
+                "enabled": node.gossip_engine is not None,
+                "interval_seconds": getattr(node.gossip_engine, "interval", 1.0) if node.gossip_engine else None,
+                "fanout": getattr(node.gossip_engine, "fanout", 3) if node.gossip_engine else None,
+                "requires_restart": True,
+                "description": "Anti-entropy gossip engine with vector-clock resource metrics",
+            },
+            "execution": {
+                "max_concurrency": max_conc,
+                "registered_tasks": node.task_registry.list_tasks(),
+                "requires_restart": True,
+                "description": "Concurrent worker task capacity and allowlisted function registry",
+            },
+            "security": {
+                "tls_enabled": tls_enabled,
+                "mTLS_required": bool(sec and sec.tls and sec.tls.require_client_cert),
+                "has_pre_shared_secret": has_shared_secret,
+                "has_auth_token": has_auth_token,
+                "allowed_peers_count": allowed_peers_count,
+                "api_key_auth_enabled": bool(configured_api_key),
+                "requires_restart": True,
+                "description": "Transport encryption (TLS/mTLS), HMAC message integrity, and API key protection",
+            },
+            "runtime_metadata": {
+                "uptime_seconds": round(time.time() - start_time, 2),
+                "is_running": node.is_running,
+                "api_auth_required_for_tasks": bool(configured_api_key),
+            },
+        }
 
     # ---------------------------------------------------------
     # WebSocket Live Feed

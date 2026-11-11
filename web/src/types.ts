@@ -80,6 +80,12 @@ export interface TaskOwnership {
   execution_semantics?: string;
 }
 
+export interface TaskTransition {
+  state: string;
+  timestamp: number;
+  label: string;
+}
+
 export interface TaskRecord {
   task_id: string;
   correlation_id?: string;
@@ -96,7 +102,67 @@ export interface TaskRecord {
   worker_history?: string[];
   ownership?: TaskOwnership | null;
   ack?: Record<string, unknown> | null;
+  transitions?: TaskTransition[];
 }
+
+export interface ConfigItem {
+  requires_restart: boolean;
+  description: string;
+  [key: string]: unknown;
+}
+
+export interface NodeConfigInfo {
+  node_identity: {
+    node_id: string;
+    dht_id_hex: string;
+    requires_restart: boolean;
+    description: string;
+  };
+  network: {
+    host: string;
+    port: number;
+    bound_port: number;
+    requires_restart: boolean;
+    description: string;
+  };
+  heartbeat: {
+    enabled: boolean;
+    interval_seconds: number;
+    missed_threshold: number;
+    requires_restart: boolean;
+    description: string;
+  };
+  gossip: {
+    enabled: boolean;
+    interval_seconds: number | null;
+    fanout: number | null;
+    requires_restart: boolean;
+    description: string;
+  };
+  execution: {
+    max_concurrency: number;
+    registered_tasks: string[];
+    requires_restart: boolean;
+    description: string;
+  };
+  security: {
+    tls_enabled: boolean;
+    mTLS_required: boolean;
+    has_pre_shared_secret: boolean;
+    has_auth_token: boolean;
+    allowed_peers_count: number;
+    api_key_auth_enabled: boolean;
+    requires_restart: boolean;
+    description: string;
+  };
+  runtime_metadata: {
+    uptime_seconds: number;
+    is_running: boolean;
+    api_auth_required_for_tasks: boolean;
+  };
+}
+
+export type ThemeMode = 'light' | 'dark' | 'system';
 
 export interface TaskAvailable {
   name: string;

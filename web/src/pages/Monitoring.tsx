@@ -6,7 +6,7 @@ import {
   PieChart as PieIcon,
   CheckCircle2,
   Clock,
-  Layers,
+  BarChart3,
 } from 'lucide-react';
 import {
   BarChart,
@@ -71,19 +71,19 @@ export const Monitoring: React.FC<MonitoringProps> = ({ metrics }) => {
       {/* Top Resource Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Local CPU */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               Coordinator CPU
             </span>
-            <Cpu className="w-4 h-4 text-blue-600" />
+            <Cpu className="w-4 h-4 text-blue-600 dark:text-blue-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900">
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
             {metrics.local_node.cpu_percent != null
               ? `${metrics.local_node.cpu_percent.toFixed(1)}%`
               : 'N/A'}
           </div>
-          <div className="w-full bg-slate-100 rounded-full h-1.5 mt-3 overflow-hidden">
+          <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 mt-3 overflow-hidden">
             <div
               className="bg-blue-600 h-1.5 rounded-full"
               style={{ width: `${metrics.local_node.cpu_percent || 0}%` }}
@@ -92,19 +92,19 @@ export const Monitoring: React.FC<MonitoringProps> = ({ metrics }) => {
         </div>
 
         {/* Local RAM */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               Coordinator Memory
             </span>
-            <HardDrive className="w-4 h-4 text-indigo-600" />
+            <HardDrive className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900">
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
             {metrics.local_node.memory_percent != null
               ? `${metrics.local_node.memory_percent.toFixed(1)}%`
               : 'N/A'}
           </div>
-          <div className="w-full bg-slate-100 rounded-full h-1.5 mt-3 overflow-hidden">
+          <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 mt-3 overflow-hidden">
             <div
               className="bg-indigo-600 h-1.5 rounded-full"
               style={{ width: `${metrics.local_node.memory_percent || 0}%` }}
@@ -113,120 +113,138 @@ export const Monitoring: React.FC<MonitoringProps> = ({ metrics }) => {
         </div>
 
         {/* Success Rate */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               Task Success Rate
             </span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900">
+          <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">
             {metrics.tasks.success_rate.toFixed(1)}%
           </div>
-          <div className="text-xs text-slate-500 mt-2">
-            {metrics.tasks.completed} completed of {metrics.tasks.total} total
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-2 flex items-center justify-between">
+            <span>Total Tasks:</span>
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{metrics.tasks.total}</span>
           </div>
         </div>
 
         {/* Avg Duration */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
-          <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Avg Execution Time
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
+          <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 mb-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              Avg Execution Latency
             </span>
-            <Clock className="w-4 h-4 text-amber-600" />
+            <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 font-mono">
+          <div className="text-2xl font-bold font-mono text-slate-900 dark:text-slate-100">
             {(metrics.tasks.avg_execution_time * 1000).toFixed(1)} ms
           </div>
-          <div className="text-xs text-slate-500 mt-2">
-            Across distributed workers
+          <div className="text-xs text-slate-500 dark:text-slate-400 mt-2 flex items-center justify-between">
+            <span>Active Connections:</span>
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{metrics.peers.active_connections}</span>
           </div>
         </div>
       </div>
 
-      {/* Main Charts: CPU & Memory Breakdown */}
+      {/* Dual Bar Charts: CPU and RAM across all peers */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* CPU Bar Chart */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        {/* CPU Chart */}
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">CPU Load by Peer (%)</h3>
-              <p className="text-xs text-slate-500">Live gossip reports from participating nodes</p>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                CPU Utilization by Peer Node (%)
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Harvested by local OS probe and exchanged via anti-entropy gossip
+              </p>
             </div>
-            <Cpu className="w-4 h-4 text-slate-400" />
+            <BarChart3 className="w-4 h-4 text-slate-400" />
           </div>
           <div className="h-56 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={cpuData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
-                <XAxis dataKey="name" stroke="#94A3B8" fontSize={10} interval={0} angle={-15} textAnchor="end" />
-                <YAxis stroke="#94A3B8" fontSize={11} domain={[0, 100]} />
+              <BarChart data={cpuData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <XAxis dataKey="name" stroke="#94A3B8" fontSize={11} tickLine={false} />
+                <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} domain={[0, 100]} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: '#FFFFFF',
-                    borderColor: '#E2E8F0',
+                    backgroundColor: 'var(--card-bg, #FFFFFF)',
+                    borderColor: 'var(--border-color, #E2E8F0)',
                     borderRadius: '0.5rem',
                     fontSize: '12px',
                   }}
+                  formatter={(val) => [`${val}%`, 'CPU Load']}
                 />
-                <Bar dataKey="cpu" fill="#2563EB" radius={[4, 4, 0, 0]} name="CPU Utilization %" />
+                <Bar dataKey="cpu" fill="#2563EB" radius={[4, 4, 0, 0]} name="CPU %" />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        {/* Memory Bar Chart */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        {/* Memory Chart */}
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">RAM Usage by Peer (%)</h3>
-              <p className="text-xs text-slate-500">Percentage of resident memory consumed</p>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Memory Consumption by Peer Node (%)
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Live host memory allocation reported across mesh members
+              </p>
             </div>
             <HardDrive className="w-4 h-4 text-slate-400" />
           </div>
           <div className="h-56 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={memData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
-                <XAxis dataKey="name" stroke="#94A3B8" fontSize={10} interval={0} angle={-15} textAnchor="end" />
-                <YAxis stroke="#94A3B8" fontSize={11} domain={[0, 100]} />
+              <BarChart data={memData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <XAxis dataKey="name" stroke="#94A3B8" fontSize={11} tickLine={false} />
+                <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} domain={[0, 100]} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: '#FFFFFF',
-                    borderColor: '#E2E8F0',
+                    backgroundColor: 'var(--card-bg, #FFFFFF)',
+                    borderColor: 'var(--border-color, #E2E8F0)',
                     borderRadius: '0.5rem',
                     fontSize: '12px',
                   }}
+                  formatter={(val) => [`${val}%`, 'Memory Usage']}
                 />
-                <Bar dataKey="memory" fill="#6366F1" radius={[4, 4, 0, 0]} name="Memory %" />
+                <Bar dataKey="memory" fill="#6366F1" radius={[4, 4, 0, 0]} name="RAM %" />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
       </div>
 
-      {/* Secondary Donut Distribution Charts */}
+      {/* Distribution Pie Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Task Status Distribution */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        {/* Task Lifecycle Distribution */}
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Task Execution Status Distribution</h3>
-              <p className="text-xs text-slate-500">Proportion of tasks across lifecycle stages</p>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Task Execution Status Distribution
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Breakdown of in-flight vs completed tasks
+              </p>
             </div>
             <PieIcon className="w-4 h-4 text-slate-400" />
           </div>
           {taskDistribution.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-xs text-slate-400">
-              No task records available to graph
+            <div className="h-56 flex items-center justify-center text-xs text-slate-400 dark:text-slate-500">
+              No tasks tracked yet. Submit tasks to view distribution.
             </div>
           ) : (
-            <div className="h-48 w-full flex items-center justify-center">
+            <div className="h-56 w-full flex items-center justify-center">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={taskDistribution}
+                    cx="50%"
+                    cy="50%"
                     innerRadius={50}
-                    outerRadius={75}
+                    outerRadius={80}
                     paddingAngle={3}
                     dataKey="value"
                   >
@@ -236,13 +254,13 @@ export const Monitoring: React.FC<MonitoringProps> = ({ metrics }) => {
                   </Pie>
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#E2E8F0',
+                      backgroundColor: 'var(--card-bg, #FFFFFF)',
+                      borderColor: 'var(--border-color, #E2E8F0)',
                       borderRadius: '0.5rem',
                       fontSize: '12px',
                     }}
                   />
-                  <Legend verticalAlign="bottom" height={36} iconSize={8} wrapperStyle={{ fontSize: '11px' }} />
+                  <Legend verticalAlign="bottom" height={36} />
                 </PieChart>
               </ResponsiveContainer>
             </div>
@@ -250,42 +268,48 @@ export const Monitoring: React.FC<MonitoringProps> = ({ metrics }) => {
         </div>
 
         {/* Peer Availability Breakdown */}
-        <div className="bg-white p-5 border border-slate-200 rounded-xl shadow-xs">
+        <div className="bg-white dark:bg-slate-900 p-5 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xs transition-colors">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Peer Health & Availability</h3>
-              <p className="text-xs text-slate-500">Active vs Unresponsive vs Stale peers</p>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Peer Liveness & Health Ratios
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Heartbeat status breakdown across discovered mesh nodes
+              </p>
             </div>
-            <Layers className="w-4 h-4 text-slate-400" />
+            <Activity className="w-4 h-4 text-slate-400" />
           </div>
           {peerAvailability.length === 0 ? (
-            <div className="h-48 flex items-center justify-center text-xs text-slate-400">
-              No registered peers in mesh
+            <div className="h-56 flex items-center justify-center text-xs text-slate-400 dark:text-slate-500">
+              No remote peers in mesh registry.
             </div>
           ) : (
-            <div className="h-48 w-full flex items-center justify-center">
+            <div className="h-56 w-full flex items-center justify-center">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={peerAvailability}
+                    cx="50%"
+                    cy="50%"
                     innerRadius={50}
-                    outerRadius={75}
+                    outerRadius={80}
                     paddingAngle={3}
                     dataKey="value"
                   >
                     {peerAvailability.map((entry, index) => (
-                      <Cell key={`cell-avail-${index}`} fill={entry.color} />
+                      <Cell key={`cell-peer-${index}`} fill={entry.color} />
                     ))}
                   </Pie>
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#E2E8F0',
+                      backgroundColor: 'var(--card-bg, #FFFFFF)',
+                      borderColor: 'var(--border-color, #E2E8F0)',
                       borderRadius: '0.5rem',
                       fontSize: '12px',
                     }}
                   />
-                  <Legend verticalAlign="bottom" height={36} iconSize={8} wrapperStyle={{ fontSize: '11px' }} />
+                  <Legend verticalAlign="bottom" height={36} />
                 </PieChart>
               </ResponsiveContainer>
             </div>

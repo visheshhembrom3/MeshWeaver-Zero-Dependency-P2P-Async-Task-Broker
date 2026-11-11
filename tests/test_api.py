@@ -290,3 +290,89 @@ def test_api_websocket_connection():
             init_data = websocket.receive_json()
             assert init_data["type"] == "connected"
             assert init_data["node_id"] == node.peer_id
+
+
+@pytest.mark.asyncio
+async def test_api_privileged_authentication():
+    """Verify API key authentication for privileged task submission."""
+    node = PeerNode(host="127.0.0.1", port=0, peer_id="auth-test-node")
+    await node.start()
+    try:
+        events = EventManager()
+        app = create_api_app(node, event_manager=events, api_key="secret-mesh-key-123")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            # 1. Unauthenticated request to /api/health should succeed (public)
+            health_resp = await client.get("/api/health")
+            assert health_resp.status_code == 200
+
+            # 2. Unauthenticated task submission should fail with 401
+            unauth_resp = await client.post(
+                "/api/tasks",
+                json={"task_name": "ping", "args": []},
+            )
+            assert unauth_resp.status_code == 401
+            assert "unauthorized" in unauth_resp.json()["detail"].lower()
+
+            # 3. Invalid API key should fail with 401
+            bad_key_resp = await client.post(
+                "/api/tasks",
+                json={"task_name": "ping", "args": []},
+                headers={"X-API-Key": "wrong-key"},
+            )
+            assert bad_key_resp.status_code == 401
+
+            # 4. Valid X-API-Key header should succeed
+            valid_x_resp = await client.post(
+                "/api/tasks",
+                json={"task_name": "ping", "args": []},
+                headers={"X-API-Key": "secret-mesh-key-123"},
+            )
+            assert valid_x_resp.status_code == 200
+            assert valid_x_resp.json()["result"] == "pong"
+
+            # 5. Valid Authorization: Bearer <key> header should succeed
+            valid_bearer_resp = await client.post(
+                "/api/tasks",
+                json={"task_name": "ping", "args": []},
+                headers={"Authorization": "Bearer secret-mesh-key-123"},
+            )
+            assert valid_bearer_resp.status_code == 200
+            assert valid_bearer_resp.json()["result"] == "pong"
+    finally:
+        await node.stop()
+
+
+@pytest.mark.asyncio
+async def test_api_task_payload_size_and_limits(async_client):
+    """Verify enforcement of argument length limits and validation."""
+    # Oversized string argument (> 64 KB)
+    huge_str = "A" * 70000
+    oversized_resp = await async_client.post(
+        "/api/tasks",
+        json={"task_name": "reverse_string", "args": [huge_str]},
+    )
+    assert oversized_resp.status_code == 413
+    assert "exceeds maximum length" in oversized_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_config_endpoint(async_client, running_node):
+    """Verify /api/config exposes supported settings and restart requirements."""
+    resp = await async_client.get("/api/config")
+    assert resp.status_code == 200
+    cfg = resp.json()
+    assert "node_identity" in cfg
+    assert cfg["node_identity"]["node_id"] == running_node.peer_id
+    assert cfg["node_identity"]["requires_restart"] is True
+    assert "network" in cfg
+    assert cfg["network"]["requires_restart"] is True
+    assert "heartbeat" in cfg
+    assert cfg["heartbeat"]["requires_restart"] is True
+    assert "gossip" in cfg
+    assert cfg["gossip"]["requires_restart"] is True
+    assert "execution" in cfg
+    assert "security" in cfg
+    assert cfg["security"]["tls_enabled"] is False
+    assert "runtime_metadata" in cfg
+

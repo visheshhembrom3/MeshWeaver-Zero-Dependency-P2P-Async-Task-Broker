@@ -6,6 +6,7 @@ import { Overview } from './pages/Overview';
 import { Topology } from './pages/Topology';
 import { Peers } from './pages/Peers';
 import { Tasks } from './pages/Tasks';
+import { TaskDetails } from './pages/TaskDetails';
 import { Monitoring } from './pages/Monitoring';
 import { Events } from './pages/Events';
 import { Settings } from './pages/Settings';
@@ -18,12 +19,39 @@ import type {
   SystemMetrics,
   TaskAvailable,
   TaskRecord,
+  ThemeMode,
 } from './types';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<PageId>('overview');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [selectedTaskIdForDetails, setSelectedTaskIdForDetails] = useState<string | null>(null);
+
+  // Theme state: dark / light
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    const saved = localStorage.getItem('meshweaver_theme') as ThemeMode | null;
+    if (saved === 'dark' || saved === 'light') return saved;
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      return 'dark';
+    }
+    return 'light';
+  });
+
+  // Apply theme class to document root
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('meshweaver_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
 
   // Core telemetry state
   const [nodeStatus, setNodeStatus] = useState<NodeStatus | null>(null);
@@ -104,7 +132,6 @@ export const App: React.FC = () => {
         }
       } else if (msg.type === 'heartbeat') {
         setIsConnected(true);
-        // Refresh periodically on heartbeat if visible
       }
     });
 
@@ -133,8 +160,13 @@ export const App: React.FC = () => {
     };
   }, [refreshInterval, loadAllData]);
 
+  const handleNavigateToTaskDetails = (taskId: string) => {
+    setSelectedTaskIdForDetails(taskId);
+    setCurrentPage('task-details');
+  };
+
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A] flex flex-col lg:flex-row antialiased">
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#0B1120] text-[#0F172A] dark:text-[#F8FAFC] flex flex-col lg:flex-row antialiased transition-colors">
       {/* Sidebar Navigation */}
       <Sidebar
         currentPage={currentPage}
@@ -142,6 +174,8 @@ export const App: React.FC = () => {
         nodeStatus={nodeStatus}
         isOpen={isMobileSidebarOpen}
         onClose={() => setIsMobileSidebarOpen(false)}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed((prev) => !prev)}
       />
 
       {/* Main Content Area */}
@@ -155,20 +189,22 @@ export const App: React.FC = () => {
           isRefreshing={isRefreshing}
           lastUpdated={lastUpdated}
           activePeersCount={peers.filter((p) => p.state === 'active' && !p.is_unresponsive).length}
+          theme={theme}
+          onToggleTheme={toggleTheme}
         />
 
         {/* Connection Error Banner */}
         {errorMessage && (
-          <div className="bg-rose-50 border-b border-rose-200 px-6 py-3 flex items-center justify-between text-xs text-rose-800">
+          <div className="bg-rose-50 dark:bg-rose-950/60 border-b border-rose-200 dark:border-rose-900 px-6 py-3 flex items-center justify-between text-xs text-rose-800 dark:text-rose-200">
             <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
               <span>
                 <strong>Backend Disconnected:</strong> {errorMessage}. Make sure the MeshWeaver node API is running (<code>python -m meshweaver dashboard</code>).
               </span>
             </div>
             <button
               onClick={() => loadAllData(false)}
-              className="px-2.5 py-1 bg-white border border-rose-200 rounded font-medium text-rose-700 hover:bg-rose-100 transition shrink-0 ml-4 flex items-center gap-1"
+              className="px-2.5 py-1 bg-white dark:bg-slate-800 border border-rose-200 dark:border-rose-800 rounded font-medium text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-slate-700 transition shrink-0 ml-4 flex items-center gap-1"
             >
               <RefreshCw className="w-3 h-3" /> Retry
             </button>
@@ -190,7 +226,13 @@ export const App: React.FC = () => {
                   tasks={tasks}
                   events={events}
                   metrics={metrics}
-                  onNavigate={(page) => setCurrentPage(page)}
+                  onNavigate={(page, taskId) => {
+                    if (page === 'task-details' && taskId) {
+                      handleNavigateToTaskDetails(taskId);
+                    } else {
+                      setCurrentPage(page);
+                    }
+                  }}
                 />
               )}
 
@@ -213,6 +255,17 @@ export const App: React.FC = () => {
                 <Tasks
                   tasks={tasks}
                   availableTasks={availableTasks}
+                  onRefresh={() => loadAllData(false)}
+                  isRefreshing={isRefreshing}
+                  onNavigateToDetails={handleNavigateToTaskDetails}
+                />
+              )}
+
+              {currentPage === 'task-details' && (
+                <TaskDetails
+                  tasks={tasks}
+                  selectedTaskId={selectedTaskIdForDetails}
+                  onSelectTask={(id) => setSelectedTaskIdForDetails(id)}
                   onRefresh={() => loadAllData(false)}
                   isRefreshing={isRefreshing}
                 />
@@ -238,6 +291,8 @@ export const App: React.FC = () => {
                   refreshInterval={refreshInterval}
                   onSetRefreshInterval={setRefreshInterval}
                   onRefreshAll={() => loadAllData(false)}
+                  theme={theme}
+                  onSetTheme={setTheme}
                 />
               )}
             </>

@@ -1,6 +1,7 @@
 import type {
   HealthInfo,
   MeshEvent,
+  NodeConfigInfo,
   NodeStatus,
   PeerStatus,
   SystemMetrics,
@@ -24,6 +25,26 @@ export const setApiBaseUrl = (url: string): void => {
   }
 };
 
+export const getApiKey = (): string => {
+  return localStorage.getItem('meshweaver_api_key') || '';
+};
+
+export const setApiKey = (key: string): void => {
+  if (!key || key.trim() === '') {
+    localStorage.removeItem('meshweaver_api_key');
+  } else {
+    localStorage.setItem('meshweaver_api_key', key.trim());
+  }
+};
+
+const getAuthHeaders = (): Record<string, string> => {
+  const key = getApiKey();
+  if (key) {
+    return { 'X-API-Key': key };
+  }
+  return {};
+};
+
 const handleResponse = async <T>(res: Response): Promise<T> => {
   if (!res.ok) {
     let errorDetail = `HTTP ${res.status}: ${res.statusText}`;
@@ -43,25 +64,41 @@ const handleResponse = async <T>(res: Response): Promise<T> => {
 export const api = {
   async getHealth(): Promise<HealthInfo> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/health`);
+    const res = await fetch(`${base}/api/health`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<HealthInfo>(res);
   },
 
   async getNodeStatus(): Promise<NodeStatus> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/node`);
+    const res = await fetch(`${base}/api/node`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<NodeStatus>(res);
+  },
+
+  async getConfig(): Promise<NodeConfigInfo> {
+    const base = getApiBaseUrl();
+    const res = await fetch(`${base}/api/config`, {
+      headers: { ...getAuthHeaders() },
+    });
+    return handleResponse<NodeConfigInfo>(res);
   },
 
   async getPeers(): Promise<PeerStatus[]> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/peers`);
+    const res = await fetch(`${base}/api/peers`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<PeerStatus[]>(res);
   },
 
   async getPeer(peerId: string): Promise<PeerStatus> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/peers/${encodeURIComponent(peerId)}`);
+    const res = await fetch(`${base}/api/peers/${encodeURIComponent(peerId)}`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<PeerStatus>(res);
   },
 
@@ -70,19 +107,25 @@ export const api = {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     params.set('limit', limit.toString());
-    const res = await fetch(`${base}/api/tasks?${params.toString()}`);
+    const res = await fetch(`${base}/api/tasks?${params.toString()}`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<TaskRecord[]>(res);
   },
 
   async getTask(taskId: string): Promise<TaskRecord> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/tasks/${encodeURIComponent(taskId)}`);
+    const res = await fetch(`${base}/api/tasks/${encodeURIComponent(taskId)}`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<TaskRecord>(res);
   },
 
   async getAvailableTasks(): Promise<TaskAvailable[]> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/tasks/available`);
+    const res = await fetch(`${base}/api/tasks/available`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<TaskAvailable[]>(res);
   },
 
@@ -92,6 +135,7 @@ export const api = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...getAuthHeaders(),
       },
       body: JSON.stringify(payload),
     });
@@ -100,7 +144,9 @@ export const api = {
 
   async getMetrics(): Promise<SystemMetrics> {
     const base = getApiBaseUrl();
-    const res = await fetch(`${base}/api/metrics`);
+    const res = await fetch(`${base}/api/metrics`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<SystemMetrics>(res);
   },
 
@@ -110,7 +156,9 @@ export const api = {
     params.set('limit', limit.toString());
     if (severity) params.set('severity', severity);
     if (eventType) params.set('event_type', eventType);
-    const res = await fetch(`${base}/api/events?${params.toString()}`);
+    const res = await fetch(`${base}/api/events?${params.toString()}`, {
+      headers: { ...getAuthHeaders() },
+    });
     return handleResponse<MeshEvent[]>(res);
   },
 };
